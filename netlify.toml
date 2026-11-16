@@ -1,0 +1,11 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Edge Function 路径映射：前端固定请求 /api/insight，与本地 Vite 代理保持一致
+[[edge_functions]]
+  function = "insight"
+  path = "/api/insight"
+
+[build.environment]
+  NODE_VERSION = "22"

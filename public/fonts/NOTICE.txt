@@ -1,0 +1,18 @@
+noto-sans-sc-subset.ttf
+=======================
+
+本文件由 scripts/build-font-subset.ts 从 Noto Sans SC Regular 子集化生成，
+仅包含 PDF 图纸用到的约 200 个字符（完整字体 7.95MB，子集 73KB）。
+
+源字体： Noto Sans SC
+版权：   Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'
+         由 Google 以 "Noto Sans SC" 名义发布
+许可：   SIL Open Font License, Version 1.1
+         https://openfontlicense.org/
+
+OFL 1.1 允许自由使用、修改、再分发（包括商用），条件：
+  1) 不得单独售卖字体本身；
+  2) 修改后的字体不得使用保留字体名（Reserved Font Name）；
+  3) 再分发时必须附带本许可声明。
+
+本子集为「修改版本」，仅用于本项目 PDF 文字渲染，不再以原字体名单独分发。
