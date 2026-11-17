@@ -124,11 +124,44 @@ AnimeGANv2 上游（TachibanaYoshino/AnimeGANv2）**未声明 LICENSE**，权重
 `models.ts` 的 `license.note` 已标注「【仅比赛/内测】」。
 **公网上线前必须替换为许可干净的模型，或摘掉卡通功能。** 像素模式无此问题（自有代码）。
 
-## 10. 剩余待办
+## 11. 方向调整：本地 ONNX 下线，改云端图像编辑 API（2026-11-17）
 
-- [ ] 接线：`run.ts` 在 `resizeToGrid` 前插入可选风格化（结果按裁剪矩形+风格缓存）
-- [ ] UI：开关/风格选择/下载确认弹窗/进度/重试/跳过；句号级文案按 §8
-- [ ] 真机验证：手机 Chrome 首开耗时、内存、是否触发 OOM
-- [ ] 浏览器 WebGPU 实测（本机无浏览器）
-- [ ] 模型自托管：`public/models/` + sha256 + `Cache-Control: immutable`
-- [ ] 清理 `transforms.ts` 里已废弃的 Photo2Pixel 预处理函数
+本地 AnimeGANv2 实测效果不达标（人像在细网格下反而更碎、风格不可控），**下线**：
+删除 `public/models/*.onnx`、移除 onnxruntime-web 依赖与 `/assets/*.wasm`（≈43MB），像素模式保留作兜底。
+
+改调云端图生图 API，先做 0 元横评（脚本 `scripts/exp-cloud-compare.ts`）：
+
+| 提供方 | 模型 | 免费额度 | 之后单价 |
+|---|---|---|---|
+| 火山方舟 | `doubao-seedream-4-0-250828` | 新号约 200 张 | 0.2 元/张 |
+| 阿里云百炼 | `wanx2.1-imageedit`（`function=stylization_all`） | 新人 500 张 | 0.14 元/张 |
+| 硅基流动（可选） | Qwen-Image-Edit | 送 14 元 | 按量 |
+
+统一提示词：
+
+> 把这张照片改成扁平插画风，硬边大色块，保留主体轮廓与构图，去掉背景杂物和细碎纹理，颜色不超过 12 种，不要文字和边框
+
+### 成本估算
+
+- 单张 **0.14–0.20 元**
+- 100 用户 × 3 次 ≈ 300 张 ≈ **42–60 元**
+- 成本护栏：每设备/IP 每天 5 次 → 最坏 500 张/天 ≈ **70–100 元/天**（超限降级本地像素）
+- 结果按 `sha256(裁剪图+风格+提示词)` 缓存，同图不重复计费
+- 横评阶段全部落在免费额度内，**0 元**
+
+### 接入前的已知风险（横评时验证）
+
+- 百炼 `stylization_all` 官方内置风格只有「法国绘本 / 金箔艺术」，自定义扁平插画风靠 prompt 引导，效果可能受限
+- 百炼 `base_image_url` 对 base64 data URL 的支持未验证；若拒绝，需要公网可访问的临时图床
+- 火山 `image` 支持 base64 与 URL；单次一张，3 张样本 = 3 次调用
+- 云端图会离开设备，UI 必须明示「图片会上传到云端处理」
+
+## 12. 剩余待办
+
+- [ ] **横评**：填 `ARK_API_KEY` / `DASHSCOPE_API_KEY` 后跑 `scripts/exp-cloud-compare.ts`，出对比图定方案
+- [ ] **下线本地 ONNX**：删 `public/models/`、卸载 onnxruntime-web、移除 `src/ai` 里卡通相关代码（省 ≈43MB wasm + 8.2MB 模型）
+- [ ] 云端接线：`POST /api/ai-style` 建任务返 taskId、`GET ?taskId` 查询、前端轮询（不在 edge 同步等 15s）
+- [ ] 客户端上传前压到长边 1024 / JPEG 0.85；结果键 `sha256(裁剪图+风格+提示词)` 缓存
+- [ ] 成本护栏：每设备/IP 每天 5 次，超限或失败降级本地像素；UI 明示「图片会上传到云端处理」
+- [ ] 真机验证：手机首开耗时、内存
+- [ ] （已作废）WebGPU 实测 / 模型自托管 / wasm 缓存头 / Photo2Pixel 清理 —— 随本地 ONNX 方案一起下线
