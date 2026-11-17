@@ -54,38 +54,22 @@ export const MODEL_ANIME: ModelSpec = {
   license: {
     name: 'MIT（转换仓库）+ 上游未声明',
     note:
-      'Kazuhito00/AnimeGANv2-ONNX-Sample 为 MIT；但其上游 TachibanaYoshino/AnimeGANv2 仓库未声明 LICENSE，权重许可存在灰区。比赛/内测可用，商业发布前需替换或取得授权。',
+      '【仅比赛/内测】Kazuhito00/AnimeGANv2-ONNX-Sample 为 MIT，但其上游 TachibanaYoshino/AnimeGANv2 仓库未声明 LICENSE，权重许可存在灰区。公网上线前必须替换为许可干净的模型或摘掉该功能。',
   },
 };
 
 /**
- * Photo2Pixel 参数化模型，实测 24,382 字节。
- * 输入 rgb 为动态 [1,3,H,W]，另有三个标量参数控制像素块大小与边缘。
+ * 像素模式**没有模型** —— 用 TS 实现（src/ai/pixelate.ts）。
+ *
+ * 原因：Photo2Pixel 的 ONNX 只有 23.8KB，但为了跑它要背 14.85MB（WASM）
+ * ～28.75MB（WebGPU）的 onnxruntime，而且它内部也就是「平滑+下采样+边缘+量化」。
+ * TS 重写后：0 额外运行时、块大小可直接对齐绣格、参数可运行时调。
+ *
+ * ⚠️ 实测补充：ONNX 版因为 pixel_size 固定 16（与绣格不对齐），碎片率反而变差；
+ *    TS 版把块边长设成「一个绣格」后，多数图类碎片率下降 30–50%。
  */
-export const MODEL_PIXEL: ModelSpec = {
-  id: 'photo2pixel-param',
-  style: 'pixel',
-  label: '像素化',
-  description: 'Photo2Pixel 参数化模型（23.8KB）。动态尺寸，按目标格数直接出图，边缘加深。',
-  urls: ['https://raw.githubusercontent.com/Jzou44/photo2pixel/main/photo2pixel.onnx'],
-  bytes: 24382,
-  sha256: '8c48dcad0b9872937efbf4ae61bf40c23ce410e23dcffed1767a2ba8d6d74d21',
-  input: { name: 'rgb', fixedSize: null, layout: 'NCHW' },
-  license: {
-    name: 'Apache-2.0',
-    note: 'Jzou44/photo2pixel 为 Apache-2.0，可商用，需保留许可声明。',
-  },
-};
-
-/** Photo2Pixel 的运行时标量参数默认值（对应它 CLI 的默认配置） */
-export const PIXEL_DEFAULTS = {
-  kernelSize: 10,
-  pixelSize: 16,
-  edgeThresh: 100,
-} as const;
 
 export function modelForStyle(style: AiStyle): ModelSpec | null {
   if (style === 'anime') return MODEL_ANIME;
-  if (style === 'pixel') return MODEL_PIXEL;
   return null;
 }

@@ -3,16 +3,17 @@
  *
  * 设计前提（都是实测出来的，不是假设）：
  *   - AnimeGANv2 ONNX 输入是**固定** [1,3,512,512]，不吃其他尺寸；
- *   - Photo2Pixel ONNX 输入是**动态**的 [1,3,H,W]，外加三个运行时标量参数；
- *   - WASM 后端一次 512×512 推理约 2.4 秒（Node 实测），所以结果必须缓存，
+ *   - 像素模式**不用 ONNX**：逻辑只是下采样+边缘+量化，用 TS 实现
+ *     （src/ai/pixelate.ts），省掉 14.85~28.75MB 的 onnxruntime；
+ *   - WASM 后端一次 512×512 推理实测约 2.3–2.4 秒（Node），所以结果必须缓存，
  *     不能每次改色数都重跑。
  */
 
 /** 风格选项。none = 走现有 stylize 管线，不加载任何模型 */
 export type AiStyle = 'none' | 'anime' | 'pixel';
 
-/** 推理后端 */
-export type AiBackend = 'webgpu' | 'wasm';
+/** 推理后端。cpu = 像素模式的纯 TS 路径（没有模型，也就没有后端） */
+export type AiBackend = 'webgpu' | 'wasm' | 'cpu';
 
 /** 模型下载 / 加载 / 推理的阶段，用于 UI 进度 */
 export type AiStage = 'idle' | 'downloading' | 'compiling' | 'running' | 'done' | 'error';
