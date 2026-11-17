@@ -1,13 +1,18 @@
-﻿/**
- * 浜戠鍥剧敓鍥炬í璇勶紙鍙窇瀵规瘮锛屼笉鍔ㄤ骇鍝佷唬鐮侊級銆? *
- *   node scripts/exp-cloud-compare.ts --dry-run          # 鏍￠獙瀵嗛挜/鍙傛暟锛屼笉鍙戣姹? *   node scripts/exp-cloud-compare.ts                    # 榛樿 pet 鍥撅紝涓ゅ鍚?3 寮? *   node scripts/exp-cloud-compare.ts --only=ark         # 鍙窇鐏北
+/**
+ * 云端图生图横评（只跑对比，不动产品代码）。
+ *
+ *   node scripts/exp-cloud-compare.ts --dry-run          # 校验密钥/参数，不发请求
+ *   node scripts/exp-cloud-compare.ts --only=ark         # 只跑火山
  *   node scripts/exp-cloud-compare.ts --image=landscape --samples=3
  *
- * 瀵嗛挜锛堝啓鍦?stitchcraft/.env.local锛屽凡 gitignore锛夛細
- *   ARK_API_KEY=...           鐏北鏂硅垷锛圫eedream 4.0锛? *   DASHSCOPE_API_KEY=...     闃块噷浜戠櫨鐐硷紙wanx2.1-imageedit锛? *   SILICONFLOW_API_KEY=...   鍙€夛紙Qwen-Image-Edit锛岄渶鍥剧墖鍏綉 URL锛屾湰鍦?base64 閫氬父涓嶆敮鎸侊級
+ * 密钥（写在 stitchcraft/.env.local，已 gitignore）：
+ *   ARK_API_KEY=...           火山方舟（Seedream 4.0）
+ *   DASHSCOPE_API_KEY=sk-...  阿里云百炼（wanx2.1-imageedit）—— 注意是 sk- 开头的 API Key，
+ *                             不是阿里云 AccessKey ID/Secret（那对是 RAM 签名用的，不能当 Bearer）
  *
- * 浜х墿锛?data/cloud-compare/<provider>-<n>.<ext> + manifest.json
- * 涔嬪悗鐢?scripts/compose-cloud-compare.py 鍚堟垚瀵规瘮鍥俱€? */
+ * 产物：.data/cloud-compare/<provider>-<n>.<ext> + manifest.json
+ * 之后用 scripts/compose-cloud-compare.py 合成对比图。
+ */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, extname, resolve } from 'node:path'
@@ -17,7 +22,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const OUT = resolve(root, '.data/cloud-compare')
 mkdirSync(OUT, { recursive: true })
 
-/* ---------------- 鍙傛暟 ---------------- */
+/* ---------------- 参数 ---------------- */
 
 const args = Object.fromEntries(
   process.argv.slice(2).map((a) => {
@@ -30,11 +35,11 @@ const ONLY = args.only ?? 'ark,dashscope'
 const SAMPLES = Number(args.samples ?? 3)
 const IMAGE_TAG = args.image ?? 'pet'
 
-/** 缁熶竴鎻愮ず璇嶏細缁欏崄瀛楃唬鐢ㄧ殑鎵佸钩鎻掔敾椋?*/
+/** 统一提示词：给十字绣用的扁平插画风 */
 const PROMPT =
-  '鎶婅繖寮犵収鐗囨敼鎴愭墎骞虫彃鐢婚锛岀‖杈瑰ぇ鑹插潡锛屼繚鐣欎富浣撹疆寤撲笌鏋勫浘锛屽幓鎺夎儗鏅潅鐗╁拰缁嗙绾圭悊锛岄鑹蹭笉瓒呰繃 12 绉嶏紝涓嶈鏂囧瓧鍜岃竟妗?
+  '把这张照片改成扁平插画风，硬边大色块，保留主体轮廓与构图，去掉背景杂物和细碎纹理，颜色不超过 12 种，不要文字和边框'
 
-/* ---------------- 璇诲彇瀵嗛挜锛堟墜鍔ㄨВ鏋?.env.local锛屼笉寮曚緷璧栵級 ---------------- */
+/* ---------------- 读取密钥（手动解析 .env.local，不引依赖） ---------------- */
 
 function loadEnvLocal(): Record<string, string> {
   const p = resolve(root, '.env.local')
@@ -49,7 +54,7 @@ function loadEnvLocal(): Record<string, string> {
 }
 const env = loadEnvLocal()
 
-/* ---------------- 鍥剧墖 ---------------- */
+/* ---------------- 图片 ---------------- */
 
 interface ImgMeta {
   tag: string
@@ -60,7 +65,7 @@ const images = JSON.parse(
   readFileSync(resolve(root, '.data/ai-images.json'), 'utf8'),
 ) as ImgMeta[]
 
-/** 婧?JPEG锛坆ase64 鐩翠紶闇€瑕佺紪鐮佸悗鐨勫浘锛宺aw 涓嶈锛?*/
+/** 源 JPEG（base64 直传需要编码后的图，raw 不行） */
 const SRC: Record<string, string> = {
   pet: resolve(root, '.data/src-pet.jpg'),
   portrait: resolve(root, '.data/src-portrait.jpg'),
@@ -69,7 +74,7 @@ const SRC: Record<string, string> = {
 
 const srcPath = SRC[IMAGE_TAG]
 if (!srcPath || !existsSync(srcPath)) {
-  console.error(`鎵句笉鍒?${IMAGE_TAG} 鐨勬簮鍥撅細${srcPath}`)
+  console.error(`找不到 ${IMAGE_TAG} 的源图：${srcPath}`)
   process.exit(1)
 }
 const srcBuf = readFileSync(srcPath)
@@ -78,21 +83,20 @@ const dataUrl = `data:${mime};base64,${srcBuf.toString('base64')}`
 const meta = images.find((i) => i.tag === IMAGE_TAG)
 const aspect = meta ? meta.width / meta.height : 4 / 3
 
-/** Seedream 灏哄锛氭€诲儚绱?鈮?921600锛屽楂樻瘮 1/16..16 */
+/** Seedream 尺寸：总像素 ≥ 921600，宽高比 1/16..16 */
 function seedreamSize(): string {
   const w = 2048
   const h = Math.max(512, Math.round(w / aspect))
   return `${w}x${h}`
 }
 
-/* ---------------- 宸ュ叿 ---------------- */
+/* ---------------- 工具 ---------------- */
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 let seq = 0
-async function saveImage(buf: ArrayBuffer, provider: string): Promise<string> {
-  const bytes = new Uint8Array(buf)
-  // 绮楃暐鍒ゆ柇 PNG/JPEG 榄旀暟
+async function saveImage(buf: ArrayBuffer | Uint8Array, provider: string): Promise<string> {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf)
   const isPng = bytes[0] === 0x89 && bytes[1] === 0x50
   const file = `${provider}-${++seq}${isPng ? '.png' : '.jpg'}`
   writeFileSync(resolve(OUT, file), bytes)
@@ -101,20 +105,23 @@ async function saveImage(buf: ArrayBuffer, provider: string): Promise<string> {
 
 async function download(url: string, provider: string): Promise<string> {
   const res = await fetch(url, { signal: AbortSignal.timeout(60000) })
-  if (!res.ok) throw new Error(`涓嬭浇缁撴灉鍥惧け璐?HTTP ${res.status}`)
+  if (!res.ok) throw new Error(`下载结果图失败 HTTP ${res.status}`)
   return saveImage(await res.arrayBuffer(), provider)
 }
 
-/* ---------------- 鐏北鏂硅垷 Seedream 4.0 ---------------- */
+/* ---------------- 火山方舟 Seedream 4.0 ---------------- */
 
 const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations'
-const ARK_MODEL = 'doubao-seedream-4-0-250828'
+/**
+ * 默认用 4.0 的现行版本号。注意 `doubao-seedream-4-0-250828` 已标记 Retiring（下线），
+ * 调它会 404 InvalidEndpointOrModel.NotFound；可用 `--ark-model=` 覆盖。
+ */
+const ARK_MODEL = args['ark-model'] ?? 'doubao-seedream-4-0-20260415'
 
 async function runArk(key: string, prompt: string): Promise<string> {
   const body = {
     model: ARK_MODEL,
     prompt,
-    // 鍥剧敓鍥撅細鍙傝€冨浘鏁扮粍锛涘畼鏂规敮鎸?URL 鎴?base64
     image: [dataUrl],
     size: seedreamSize(),
     response_format: 'url',
@@ -129,19 +136,19 @@ async function runArk(key: string, prompt: string): Promise<string> {
   })
   const ms = performance.now() - t0
   const text = await res.text()
-  if (!res.ok) throw new Error(`ARK ${res.status}: ${text.slice(0, 300)}`)
+  if (!res.ok) throw new Error(`ARK ${res.status}: ${text.slice(0, 400)}`)
 
   const json = JSON.parse(text) as { data?: { url?: string; b64_json?: string }[] }
   const item = json.data?.[0]
-  if (!item) throw new Error(`ARK 杩斿洖鏃?data锛?{text.slice(0, 200)}`)
+  if (!item) throw new Error(`ARK 返回无 data：${text.slice(0, 300)}`)
   const file = item.url
     ? await download(item.url, 'ark')
     : await saveImage(Buffer.from(item.b64_json ?? '', 'base64'), 'ark')
-  console.log(`  ark     ${ms.toFixed(0)}ms 鈫?${file}`)
+  console.log(`  ark     ${ms.toFixed(0)}ms -> ${file}`)
   return file
 }
 
-/* ---------------- 闃块噷浜戠櫨鐐?wanx2.1-imageedit锛堝紓姝ワ級 ---------------- */
+/* ---------------- 阿里云百炼 wanx2.1-imageedit（异步） ---------------- */
 
 const DS_BASE = 'https://dashscope.aliyuncs.com/api/v1'
 const DS_MODEL = 'wanx2.1-imageedit'
@@ -153,13 +160,11 @@ async function runDashscope(key: string, prompt: string): Promise<string> {
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${key}`,
-      // 蹇呴』寮€寮傛锛屽惁鍒欓暱浠诲姟浼氳缃戝叧鎺愭柇
       'X-DashScope-Async': 'enable',
     },
     body: JSON.stringify({
       model: DS_MODEL,
       input: {
-        // 鏁村浘椋庢牸鍖栵紱瀹樻柟鏀寔鐨勮嚜甯﹂鏍煎彧鏈夌粯鏈?閲戠當锛岃繖閲岄潬 prompt 寮曞
         function: 'stylization_all',
         prompt,
         base_image_url: dataUrl,
@@ -169,42 +174,38 @@ async function runDashscope(key: string, prompt: string): Promise<string> {
     signal: AbortSignal.timeout(60000),
   })
   const text = await res.text()
-  if (!res.ok) throw new Error(`DashScope 鍒涘缓浠诲姟 ${res.status}: ${text.slice(0, 300)}`)
+  if (!res.ok) throw new Error(`DashScope 创建任务 ${res.status}: ${text.slice(0, 400)}`)
   const created = JSON.parse(text) as { output?: { task_id?: string } }
   const taskId = created.output?.task_id
-  if (!taskId) throw new Error(`DashScope 鏈繑鍥?task_id锛?{text.slice(0, 200)}`)
+  if (!taskId) throw new Error(`DashScope 未返回 task_id：${text.slice(0, 300)}`)
 
-  // 杞锛堜换鍔℃湁鏁堟湡 24h锛涜繖閲屾渶澶氱瓑 3 鍒嗛挓锛?  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 90; i++) {
     await sleep(2000)
     const q = await fetch(`${DS_BASE}/tasks/${taskId}`, {
       headers: { Authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(30000),
     })
     const qt = await q.text()
-    if (!q.ok) throw new Error(`DashScope 鏌ヨ ${q.status}: ${qt.slice(0, 300)}`)
+    if (!q.ok) throw new Error(`DashScope 查询 ${q.status}: ${qt.slice(0, 300)}`)
     const j = JSON.parse(qt) as {
-      output?: {
-        task_status?: string
-        results?: { url?: string }[]
-        message?: string
-      }
+      output?: { task_status?: string; results?: { url?: string }[]; message?: string }
     }
     const st = j.output?.task_status
     if (st === 'SUCCEEDED') {
       const url = j.output?.results?.[0]?.url
-      if (!url) throw new Error('浠诲姟鎴愬姛浣嗘病鏈夌粨鏋?URL')
+      if (!url) throw new Error('任务成功但没有结果 URL')
       const file = await download(url, 'dashscope')
-      console.log(`  dashscope ${(performance.now() - t0).toFixed(0)}ms 鈫?${file}`)
+      console.log(`  dashscope ${(performance.now() - t0).toFixed(0)}ms -> ${file}`)
       return file
     }
     if (st === 'FAILED' || st === 'UNKNOWN') {
-      throw new Error(`浠诲姟澶辫触锛?{st} ${j.output?.message ?? ''}`)
+      throw new Error(`任务失败：${st} ${j.output?.message ?? ''}`)
     }
   }
-  throw new Error('DashScope 杞瓒呮椂锛? 鍒嗛挓锛?)
+  throw new Error('DashScope 轮询超时（3 分钟）')
 }
 
-/* ---------------- 涓绘祦绋?---------------- */
+/* ---------------- 主流程 ---------------- */
 
 const providers = ONLY.split(',').map((s) => s.trim()).filter(Boolean)
 const KEY_ENV: Record<string, string> = {
@@ -212,18 +213,19 @@ const KEY_ENV: Record<string, string> = {
   dashscope: 'DASHSCOPE_API_KEY',
 }
 
-console.log(`鍥剧墖锛?{IMAGE_TAG}锛?{srcPath}锛塦)
-console.log(`鎻愮ず璇嶏細${PROMPT}`)
-console.log(`鏍锋湰鏁帮細姣忓 ${SAMPLES} 寮?路 鎻愪緵鏂癸細${providers.join(', ')}`)
+console.log(`图片：${IMAGE_TAG}（${srcPath}）`)
+console.log(`提示词：${PROMPT}`)
+console.log(`样本数：每家 ${SAMPLES} 张 · 提供方：${providers.join(', ')}`)
 
 if (DRY) {
-  console.log('\n[dry-run] 涓嶈仈缃戯紝浠呮牎楠岋細')
+  console.log('\n[dry-run] 不联网，仅校验：')
   for (const p of providers) {
     const envName = KEY_ENV[p] ?? 'UNKNOWN'
-    console.log(`  ${p}: ${env[envName] ? `瀵嗛挜宸查厤缃紙${env[envName].slice(0, 4)}鈥︼級` : `缂哄皯 ${envName}`}`)
+    const v = env[envName]
+    console.log(`  ${p}: ${v ? `密钥已配置（${v.slice(0, 4)}…，长度 ${v.length}）` : `缺少 ${envName}`}`)
   }
-  console.log(`  鐏北 model=${ARK_MODEL} size=${seedreamSize()} image=${mime} ${(srcBuf.length / 1024).toFixed(0)}KB`)
-  console.log(`  鐧剧偧 model=${DS_MODEL} function=stylization_all strength=0.6锛堝紓姝ヨ疆璇級`)
+  console.log(`  火山 model=${ARK_MODEL} size=${seedreamSize()} image=${mime} ${(srcBuf.length / 1024).toFixed(0)}KB`)
+  console.log(`  百炼 model=${DS_MODEL} function=stylization_all strength=0.6（异步轮询）`)
   process.exit(0)
 }
 
@@ -240,28 +242,33 @@ for (const provider of providers) {
   const envName = KEY_ENV[provider]
   const key = env?.[envName]
   if (!key) {
-    console.warn(`\n鈿?璺宠繃 ${provider}锛?env.local 閲屾病鏈?${envName}`)
+    console.warn(`\n⚠ 跳过 ${provider}：.env.local 里没有 ${envName}`)
     continue
   }
   console.log(`\n=== ${provider} ===`)
   for (let i = 0; i < SAMPLES; i++) {
     try {
-      const file =
-        provider === 'ark'
-          ? await runArk(key, PROMPT)
-          : await runDashscope(key, PROMPT)
+      const file = provider === 'ark' ? await runArk(key, PROMPT) : await runDashscope(key, PROMPT)
       manifest.push({ image: IMAGE_TAG, prompt: PROMPT, provider, file, ok: true })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      console.error(`  鉁?${provider} 绗?${i + 1} 寮犲け璐ワ細${message}`)
+      console.error(`  x ${provider} 第 ${i + 1} 张失败：${message}`)
       manifest.push({ image: IMAGE_TAG, prompt: PROMPT, provider, file: '', ok: false, error: message })
     }
   }
 }
 
-writeFileSync(resolve(OUT, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8')
+// 合并已有 manifest（分供应商跑时保留对方结果）
+const manifestPath = resolve(OUT, 'manifest.json')
+const previous = existsSync(manifestPath)
+  ? (JSON.parse(readFileSync(manifestPath, 'utf8')) as typeof manifest)
+  : []
+const merged = [
+  ...previous.filter((p) => !providers.includes(p.provider)),
+  ...manifest,
+]
+writeFileSync(manifestPath, JSON.stringify(merged, null, 2), 'utf8')
 
 const okCount = manifest.filter((m) => m.ok).length
-console.log(`\n瀹屾垚锛氭垚鍔?${okCount} / ${manifest.length} 寮狅紝浜х墿鍦?.data/cloud-compare/`)
-console.log('涓嬩竴姝ワ細python scripts/compose-cloud-compare.py')
-
+console.log(`\n本次完成：成功 ${okCount} / ${manifest.length} 张，产物在 .data/cloud-compare/`)
+console.log('下一步：python scripts/compose-cloud-compare.py --image=' + IMAGE_TAG)
