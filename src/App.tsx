@@ -61,6 +61,7 @@ export default function App() {
   const [aiBusy, setAiBusy] = useState(false);
   const [aiRunning, setAiRunning] = useState(false);
   const [aiSlowWarn, setAiSlowWarn] = useState(false);
+  const [aiBaseline, setAiBaseline] = useState<number | null>(null);
   const aiStartRef = useRef(0);
 
   const firstRunRef = useRef(true);
@@ -226,6 +227,10 @@ export default function App() {
             if (out.suggestedColors) setSuggested(out.suggestedColors);
             firstRunRef.current = false;
             setBusy(false);
+            // 关闭 AI 时的碎片率作为对照基线（约束①：如实显示前后两个数字）
+            if (aiStyle === 'none') {
+              setAiBaseline(out.report.continuity.confettiRatio);
+            }
 
             // 8 秒规则：从点开启卡通到出图超过 8 秒 → 自动关掉（可恢复，不静默记住）
             if (aiStyle === 'anime' && aiStartRef.current > 0) {
@@ -409,6 +414,8 @@ export default function App() {
               warmInfo={aiWarm}
               lastResult={aiLast}
               debug={debugEnabled}
+              baselineConfetti={aiBaseline}
+              currentConfetti={result?.report.continuity.confettiRatio ?? null}
             />
           )}
         </section>

@@ -29,6 +29,9 @@ interface Props {
   warmInfo: WarmInfo | null;
   lastResult: AiStyleResult | null;
   debug: boolean;
+  /** 关闭 AI 时的碎片率，用于如实展示「前后两个数字」 */
+  baselineConfetti: number | null;
+  currentConfetti: number | null;
 }
 
 const mb = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
@@ -151,6 +154,14 @@ export function AiStylePanel(props: Props) {
           <button type="button" className="btn-ghost" onClick={props.onRecover}>
             重新开启
           </button>
+        </div>
+      )}
+
+      {style !== 'none' && props.baselineConfetti !== null && props.currentConfetti !== null && (
+        <div className="ai-compare">
+          碎片率：{Math.round(props.baselineConfetti * 1000) / 10}% →{' '}
+          {Math.round(props.currentConfetti * 1000) / 10}%
+          <span className="ai-compare-hint">（真实数字，不代表更好绣）</span>
         </div>
       )}
 
