@@ -24,3 +24,6 @@ dist-ssr
 
 # 本地 npm 缓存
 .npm-cache/
+
+# ORT 运行时（29MB，由 npm run ort:copy 生成）
+/public/ort/
