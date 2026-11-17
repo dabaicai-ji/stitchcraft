@@ -35,6 +35,10 @@ export interface AiStyleResult {
   backend: AiBackend;
   /** 模型体积（字节），用于在 UI 上说明「下载了多少」 */
   modelBytes: number;
+  /** wasm 运行时体积（字节，像素模式为 0） */
+  wasmBytes: number;
+  /** 本次模型下载耗时（毫秒；命中缓存时为 0 或首次加载耗时） */
+  downloadMs: number;
   /** 推理耗时（毫秒） */
   inferenceMs: number;
   /** 是否命中了缓存（同一张裁剪图重复请求时为 true） */

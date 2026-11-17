@@ -46,6 +46,9 @@ export const MODEL_ANIME: ModelSpec = {
   label: '卡通化',
   description: 'AnimeGANv2 人脸/人像风格。512×512 固定输入，画面会变成动画笔触。',
   urls: [
+    // 同源第一位：国内首开稳定，且可配 immutable 缓存头
+    '/models/animeganv2-face-paint-512.onnx',
+    // 回退：同源 404 时才走（只在网络/HTTP 失败时回退；sha256 不匹配会直接报错）
     'https://raw.githubusercontent.com/Kazuhito00/AnimeGANv2-ONNX-Sample/main/model/face_paint_512_v2_0.onnx',
   ],
   bytes: 8594990,

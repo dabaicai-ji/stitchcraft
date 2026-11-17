@@ -13,8 +13,10 @@
  *
  * 2) 动态 import：这些包 + wasm 都不能进首屏包，只有用户真正开启 AI 才加载。
  *
- * 部署前提：wasm 文件由 scripts/copy-ort-wasm.ts 复制到 public/ort/
- *          （prebuild 自动执行，脚本会自检 bundle 引用的文件名是否都已复制）。
+ * 部署前提：**wasm 不再手动复制到 public/**。Vite 会在打包时把 ORT bundle 里的
+ * `new URL("<wasm>", import.meta.url)` 改写成带哈希的 /assets/ 资源，天然可长缓存；
+ * 手动复制一份到 public/ort 会让部署体积翻倍（实测 41.7MB + 43.6MB）。
+ * scripts/copy-ort-wasm.ts 已改为**只校验不复制**。
  */
 
 import type { AiBackend } from './types.ts';
@@ -48,8 +50,8 @@ export async function getOrt(backend: AiBackend): Promise<OrtModule> {
           : await import('onnxruntime-web/wasm');
 
       const ort = mod as unknown as OrtModule;
-      // wasm 与 .mjs loader 由构建脚本复制到 public/ort/
-      ort.env.wasm.wasmPaths = '/ort/';
+      // 不设置 wasmPaths：让 ORT 用 import.meta.url 解析，Vite 会把 wasm 发成
+      // 带哈希的 /assets/*.wasm，可配 immutable 缓存，且不会与 public/ 重复占体积。
       // 没有跨源隔离（COOP/COEP）时 SharedArrayBuffer 不可用，只能单线程
       const isolated =
         typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;

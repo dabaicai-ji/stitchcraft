@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AiReport } from './components/AiReport.tsx';
+import { AiStylePanel } from './components/AiStylePanel.tsx';
 import { CropStage } from './components/CropStage.tsx';
 import type { CropData, CropResult } from './components/CropStage.tsx';
 import { GridCanvas } from './components/GridCanvas.tsx';
@@ -20,6 +21,10 @@ import { DEFAULT_PARAMS } from './core/pipeline/run.ts';
 import type { PipelineOutput, PipelineParams } from './core/pipeline/run.ts';
 import { DMC_META } from './core/palette/dmc.ts';
 import { runPipelineInWorker } from './lib/workerClient.ts';
+import { applyAiStyle, disposeAi, warmModel } from './ai/client.ts';
+import type { WarmInfo } from './ai/client.ts';
+import type { AiProgress, AiStyle, AiStyleResult } from './ai/types.ts';
+import { BUILD_INFO, debugEnabled, deviceLine } from './lib/env.ts';
 import { buildThreadCsv, downloadCsv } from './render/exportCsv.ts';
 import { loadPdfFont } from './render/pdf/font.ts';
 import { planPages } from './render/pdf/layout.ts';
@@ -46,6 +51,17 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [suggested, setSuggested] = useState<number | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
+
+  // ---- AI 风格化 ----
+  const [aiStyle, setAiStyle] = useState<AiStyle>('none');
+  const [aiProgress, setAiProgress] = useState<AiProgress | null>(null);
+  const [aiWarm, setAiWarm] = useState<WarmInfo | null>(null);
+  const [aiLast, setAiLast] = useState<AiStyleResult | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiSlowWarn, setAiSlowWarn] = useState(false);
+  const aiStartRef = useRef(0);
 
   const firstRunRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -112,6 +128,47 @@ export default function App() {
     }
   }, [source, replaceUrl]);
 
+  /* ---------------- AI 风格化 ---------------- */
+  const chooseAiStyle = useCallback(async (next: AiStyle) => {
+    setAiError(null);
+    if (next === 'none') {
+      setAiStyle('none');
+      disposeAi();
+      setAiWarm(null);
+      setAiProgress(null);
+      return;
+    }
+    // 像素模式：0 下载，不 warm（它没有模型）
+    if (next === 'pixel') {
+      setAiStyle('pixel');
+      return;
+    }
+
+    // 卡通：先下载模型再切换，失败保持原样
+    setAiBusy(true);
+    aiStartRef.current = performance.now();
+    try {
+      const info = await warmModel('anime', setAiProgress);
+      setAiWarm(info);
+      setAiStyle('anime');
+      setAiSlowWarn(false);
+    } catch (err) {
+      setAiError(`模型加载失败：${err instanceof Error ? err.message : String(err)}`);
+      setAiStyle('none');
+    } finally {
+      setAiBusy(false);
+      setAiProgress(null);
+    }
+  }, []);
+
+  const skipAiDownload = useCallback(() => {
+    disposeAi();
+    setAiBusy(false);
+    setAiProgress(null);
+    setAiRunning(false);
+    setAiStyle('none');
+  }, []);
+
   /* ---------------- 跑管线 ---------------- */
   useEffect(() => {
     if (!source || stage !== 'result') return;
@@ -119,36 +176,78 @@ export default function App() {
     const wantSuggestion = firstRunRef.current;
     const timer = window.setTimeout(
       () => {
-        abortRef.current?.abort();
-        const ctrl = new AbortController();
-        abortRef.current = ctrl;
-        setBusy(true);
+        void (async () => {
+          abortRef.current?.abort();
+          const ctrl = new AbortController();
+          abortRef.current = ctrl;
+          setBusy(true);
 
-        runPipelineInWorker({
-          rgba: source.rgba,
-          srcWidth: source.width,
-          srcHeight: source.height,
-          params,
-          suggestColors: wantSuggestion,
-          signal: ctrl.signal,
-        })
-          .then((out) => {
+          // ---- 可选：先做 AI 风格化（结果直接替换 RGBA，下游不用改）----
+          let inputRgba = source.rgba;
+          if (aiStyle !== 'none') {
+            setAiRunning(true);
+            try {
+              const styled = await applyAiStyle({
+                style: aiStyle,
+                rgba: source.rgba,
+                width: source.width,
+                height: source.height,
+                gridWidth: params.targetWidth,
+                cacheKey: crop
+                  ? `${crop.x},${crop.y},${crop.width},${crop.height}`
+                  : undefined,
+                onProgress: setAiProgress,
+              });
+              inputRgba = styled.rgba;
+              setAiLast(styled);
+              setAiProgress(null);
+            } catch (err) {
+              if (!(err instanceof DOMException && err.name === 'AbortError')) {
+                setAiError(err instanceof Error ? err.message : String(err));
+                setAiStyle('none');
+              }
+              setAiRunning(false);
+              setBusy(false);
+              return;
+            }
+            setAiRunning(false);
+          }
+
+          try {
+            const out = await runPipelineInWorker({
+              rgba: inputRgba,
+              srcWidth: source.width,
+              srcHeight: source.height,
+              params,
+              suggestColors: wantSuggestion,
+              signal: ctrl.signal,
+            });
             setResult(out);
             if (out.suggestedColors) setSuggested(out.suggestedColors);
             firstRunRef.current = false;
             setBusy(false);
-          })
-          .catch((err: unknown) => {
+
+            // 8 秒规则：从点开启卡通到出图超过 8 秒 → 自动关掉（可恢复，不静默记住）
+            if (aiStyle === 'anime' && aiStartRef.current > 0) {
+              const elapsed = performance.now() - aiStartRef.current;
+              if (elapsed > 8000) {
+                setAiStyle('none');
+                setAiSlowWarn(true);
+              }
+              aiStartRef.current = 0;
+            }
+          } catch (err) {
             if (err instanceof DOMException && err.name === 'AbortError') return;
             setError(err instanceof Error ? err.message : String(err));
             setBusy(false);
-          });
+          }
+        })();
       },
       wantSuggestion ? 0 : 180,
     );
 
     return () => window.clearTimeout(timer);
-  }, [source, params, stage]);
+  }, [source, params, stage, aiStyle, crop]);
 
   const onChange = useCallback((patch: Partial<PipelineParams>) => {
     setParams((prev) => ({ ...prev, ...patch }));
@@ -294,6 +393,24 @@ export default function App() {
               uniqueColors={result?.quantize.uniqueColors ?? null}
             />
           )}
+
+          {stage === 'result' && (
+            <AiStylePanel
+              style={aiStyle}
+              onChoose={(next) => void chooseAiStyle(next)}
+              progress={aiProgress}
+              running={aiRunning}
+              busy={aiBusy}
+              error={aiError}
+              onRetry={() => void chooseAiStyle('anime')}
+              onSkip={skipAiDownload}
+              slowWarn={aiSlowWarn}
+              onRecover={() => void chooseAiStyle('anime')}
+              warmInfo={aiWarm}
+              lastResult={aiLast}
+              debug={debugEnabled}
+            />
+          )}
         </section>
 
         <aside className="side">
@@ -319,7 +436,13 @@ export default function App() {
       </main>
 
       <footer className="footer">
-        色卡数据：{DMC_META.attribution} · {DMC_META.license} · 社区近似 sRGB 值，非 DMC 官方数据
+        <span>
+          色卡数据：{DMC_META.attribution} · {DMC_META.license} · 社区近似 sRGB 值，非 DMC 官方数据
+        </span>
+        <span className="build-info">
+          版本 {BUILD_INFO.hash} · {BUILD_INFO.time}
+          {debugEnabled ? ` · ${deviceLine()}` : ''}
+        </span>
       </footer>
     </div>
   );

@@ -9,3 +9,35 @@
 
 [build.environment]
   NODE_VERSION = "22"
+
+# ---------------------------------------------------------------------------
+# 静态资源缓存：模型 8.2MB + wasm 14.9/28.8MB，必须长缓存，否则每次首开都重下
+# ---------------------------------------------------------------------------
+[[headers]]
+  for = "/models/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Access-Control-Allow-Origin = "*"
+
+# wasm 由 Vite 打成带哈希的 /assets/*.wasm；静态资源同理，全部长缓存
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# ---------------------------------------------------------------------------
+# 跨源隔离（COOP/COEP）
+#
+# 目的：开启后 crossOriginIsolated = true → SharedArrayBuffer 可用 →
+#      onnxruntime 的 numThreads 能上到 4，512² 推理有机会从 2.4s 降到 1s 级。
+#      这直接决定手机端能不能过 8 秒线。
+#
+# 风险：COEP: require-corp 会拦掉没有 CORP 头的**跨域**资源。
+#      本站资源（模型 / wasm / 字体 / /api/insight）全部同源，理论上安全。
+#      如果实测出现资源被拦（控制台报 COEP/CORP），把下面两行删掉即可回滚。
+# ---------------------------------------------------------------------------
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "require-corp"

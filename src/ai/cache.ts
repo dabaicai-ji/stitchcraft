@@ -72,42 +72,61 @@ export interface LoadModelOptions {
   signal?: AbortSignal;
 }
 
+export interface LoadedModel {
+  bytes: Uint8Array;
+  /** true = 命中 IndexedDB，没有走网络 */
+  fromCache: boolean;
+}
+
 /**
  * 取模型字节：先查 IndexedDB，未命中再按 urls 顺序下载。
  * 两条路径都做 sha256 校验。
+ *
+ * 回退规则（用户要求）：
+ *   - **网络/HTTP 失败** → 换下一个源（同源 → GitHub raw）
+ *   - **sha256 不匹配** → 立即抛错，绝不静默换源
+ *     因为校验失败意味着「拿到了内容不对的东西」，换源会掩盖真实问题。
  */
 export async function loadModelBytes(
   spec: ModelSpec,
   opts: LoadModelOptions = {},
-): Promise<Uint8Array> {
+): Promise<LoadedModel> {
   const key = cacheKey(spec);
 
   const cached = await idbGet(key);
   if (cached) {
     if ((await sha256Hex(cached)) === spec.sha256) {
       opts.onProgress?.(cached.byteLength, cached.byteLength);
-      return new Uint8Array(cached);
+      return { bytes: new Uint8Array(cached), fromCache: true };
     }
     // 缓存损坏：当作未命中，走下载覆盖
   }
 
   let lastError: unknown = null;
   for (const url of spec.urls) {
+    let buf: ArrayBuffer;
     try {
-      const buf = await downloadWithProgress(url, spec.bytes, opts);
-      if ((await sha256Hex(buf)) !== spec.sha256) {
-        throw new Error('模型校验失败（sha256 不匹配，可能是 CDN 返回了错误页）');
-      }
-      await idbPut(key, buf);
-      return new Uint8Array(buf);
+      buf = await downloadWithProgress(url, spec.bytes, opts);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') throw err;
       lastError = err;
+      continue;
     }
+
+    const got = await sha256Hex(buf);
+    if (got !== spec.sha256) {
+      throw new Error(
+        `模型完整性校验失败：${url} 的 sha256 是 ${got.slice(0, 12)}…，期望 ${spec.sha256.slice(0, 12)}…。` +
+          '已中止（不会静默换源）。',
+      );
+    }
+
+    await idbPut(key, buf);
+    return { bytes: new Uint8Array(buf), fromCache: false };
   }
 
   throw new Error(
-    `模型下载失败：${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    `模型下载失败（所有源均不可用）：${lastError instanceof Error ? lastError.message : String(lastError)}`,
   );
 }
 

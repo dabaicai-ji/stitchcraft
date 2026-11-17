@@ -12,7 +12,7 @@ import type { AiBackend, AiProgress, AiStyle } from './types.ts';
 import { loadModelBytes } from './cache.ts';
 import { modelForStyle } from './models.ts';
 import type { ModelSpec } from './models.ts';
-import { createSession, detectBackend } from './runtime.ts';
+import { createSession, WASM_BYTES } from './runtime.ts';
 import type { SessionHandle } from './runtime.ts';
 import { assertNonEmpty, postprocessAnime, preprocessAnime } from './transforms.ts';
 import { pixelate } from './pixelate.ts';
@@ -21,6 +21,8 @@ import type { PixelateParams } from './pixelate.ts';
 export interface WarmRequest {
   type: 'warm';
   style: AiStyle;
+  /** 主线程解析好的后端（默认 wasm，?backend=webgpu 时才是 webgpu） */
+  backend?: AiBackend;
 }
 
 export interface RunRequest {
@@ -35,13 +37,21 @@ export interface RunRequest {
   gridHeight?: number;
   /** 像素模式参数；省略则按图纸格数推导（块 = 1 绣格） */
   pixelateParams?: Partial<PixelateParams>;
+  backend?: AiBackend;
 }
 
 export type WorkerRequest = WarmRequest | RunRequest | { type: 'dispose' };
 
 export type WorkerResponse =
   | { type: 'progress'; progress: AiProgress }
-  | { type: 'ready'; backend: AiBackend; modelBytes: number; cached: boolean }
+  | {
+      type: 'ready';
+      backend: AiBackend;
+      modelBytes: number;
+      fromCache: boolean;
+      downloadMs: number;
+      wasmBytes: number;
+    }
   | {
       type: 'result';
       id: number;
@@ -51,6 +61,9 @@ export type WorkerResponse =
       backend: AiBackend;
       inferenceMs: number;
       modelBytes: number;
+      downloadMs: number;
+      fromCache: boolean;
+      wasmBytes: number;
     }
   | { type: 'error'; id?: number; message: string };
 
@@ -59,6 +72,9 @@ interface Loaded {
   spec: ModelSpec;
   inputName: string;
   outputName: string;
+  downloadMs: number;
+  fromCache: boolean;
+  wasmBytes: number;
 }
 
 /** 按风格缓存的会话（同一时刻一般只用一种） */
@@ -75,15 +91,17 @@ function pushProgress(progress: AiProgress): void {
   post({ type: 'progress', progress });
 }
 
-async function ensureLoaded(style: AiStyle): Promise<Loaded> {
+async function ensureLoaded(style: AiStyle, backend: AiBackend): Promise<Loaded> {
   const existing = loaded.get(style);
   if (existing) return existing;
 
   const spec = modelForStyle(style);
-  if (!spec) throw new Error(`未知风格：${style}`);
+  if (!spec) throw new Error(`风格 ${style} 不需要模型（像素模式走纯 TS 路径）`);
 
   pushProgress({ stage: 'downloading', ratio: 0 });
-  const bytes = await loadModelBytes(spec, {
+
+  const tDownload = performance.now();
+  const model = await loadModelBytes(spec, {
     onProgress: (loadedBytes, totalBytes) =>
       pushProgress({
         stage: 'downloading',
@@ -92,19 +110,29 @@ async function ensureLoaded(style: AiStyle): Promise<Loaded> {
         totalBytes,
       }),
   });
+  const downloadMs = performance.now() - tDownload;
 
-  pushProgress({ stage: 'compiling', ratio: null, totalBytes: spec.bytes });
-  const preferred = await detectBackend();
-  const handle = await createSession(bytes, preferred);
+  pushProgress({ stage: 'compiling', ratio: null, totalBytes: spec.bytes, backend });
+  const handle = await createSession(model.bytes, backend === 'webgpu' ? 'webgpu' : 'wasm');
 
   pushProgress({ stage: 'idle', ratio: 1, backend: handle.backend });
-  post({ type: 'ready', backend: handle.backend, modelBytes: spec.bytes, cached: true });
+  post({
+    type: 'ready',
+    backend: handle.backend,
+    modelBytes: spec.bytes,
+    fromCache: model.fromCache,
+    downloadMs,
+    wasmBytes: 0,
+  });
 
   const entry: Loaded = {
     handle,
     spec,
     inputName: spec.input.name,
     outputName: style === 'anime' ? 'output_image' : 'output',
+    downloadMs,
+    fromCache: model.fromCache,
+    wasmBytes: 0,
   };
   loaded.set(style, entry);
   return entry;
@@ -136,13 +164,16 @@ async function run(req: RunRequest): Promise<void> {
         backend: 'cpu',
         inferenceMs: ms,
         modelBytes: 0,
+        downloadMs: 0,
+        fromCache: false,
+        wasmBytes: 0,
       },
       [out.buffer as ArrayBuffer],
     );
     return;
   }
 
-  const entry = await ensureLoaded(req.style);
+  const entry = await ensureLoaded(req.style, req.backend ?? 'wasm');
   const { session, ort, backend } = entry.handle;
   pushProgress({ stage: 'running', ratio: null, backend });
 
@@ -177,6 +208,9 @@ async function run(req: RunRequest): Promise<void> {
       backend,
       inferenceMs,
       modelBytes: entry.spec.bytes,
+      downloadMs: entry.downloadMs,
+      fromCache: entry.fromCache,
+      wasmBytes: WASM_BYTES[backend],
     },
     [outData.data.buffer as ArrayBuffer],
   );
@@ -199,7 +233,7 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
   void (async () => {
     try {
       if (req.type === 'warm') {
-        await ensureLoaded(req.style);
+        await ensureLoaded(req.style, req.backend ?? 'wasm');
       } else if (req.type === 'run') {
         await run(req);
       }
