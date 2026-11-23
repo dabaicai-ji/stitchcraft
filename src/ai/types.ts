@@ -1,30 +1,21 @@
 /**
- * AI 风格化的公共类型。
+ * 风格化的公共类型。
  *
- * 设计前提（都是实测出来的，不是假设）：
- *   - AnimeGANv2 ONNX 输入是**固定** [1,3,512,512]，不吃其他尺寸；
- *   - 像素模式**不用 ONNX**：逻辑只是下采样+边缘+量化，用 TS 实现
- *     （src/ai/pixelate.ts），省掉 14.85~28.75MB 的 onnxruntime；
- *   - WASM 后端一次 512×512 推理实测约 2.3–2.4 秒（Node），所以结果必须缓存，
- *     不能每次改色数都重跑。
+ * 本模块只剩**像素模式**：纯 TS 实现（pixelate.ts），0 下载、0 外部运行时。
+ *
+ * 本地 ONNX 卡通分支（AnimeGANv2 + onnxruntime-web）已按 2026-11-17 的决定下线：
+ * 实测它在多数档位并不降低碎片率，却要背 8.2MB 模型 + 14.9~28.8MB wasm，
+ * 且上游权重许可存在灰区。决策与实测数据见 AI_STYLIZE.md。
  */
 
-/** 风格选项。none = 走现有 stylize 管线，不加载任何模型 */
-export type AiStyle = 'none' | 'anime' | 'pixel';
+/** 风格选项。none = 不启用风格化，走原有管线 */
+export type AiStyle = 'none' | 'pixel';
 
-/** 推理后端。cpu = 像素模式的纯 TS 路径（没有模型，也就没有后端） */
-export type AiBackend = 'webgpu' | 'wasm' | 'cpu';
-
-/** 模型下载 / 加载 / 推理的阶段，用于 UI 进度 */
-export type AiStage = 'idle' | 'downloading' | 'compiling' | 'running' | 'done' | 'error';
+/** 处理阶段（像素模式没有下载与编译，只有运行） */
+export type AiStage = 'idle' | 'running' | 'done' | 'error';
 
 export interface AiProgress {
   stage: AiStage;
-  /** 0..1，未知时为 null */
-  ratio: number | null;
-  loadedBytes?: number;
-  totalBytes?: number;
-  backend?: AiBackend;
   message?: string;
 }
 
@@ -32,24 +23,6 @@ export interface AiStyleResult {
   rgba: Uint8ClampedArray;
   width: number;
   height: number;
-  backend: AiBackend;
-  /** 模型体积（字节），用于在 UI 上说明「下载了多少」 */
-  modelBytes: number;
-  /** wasm 运行时体积（字节，像素模式为 0） */
-  wasmBytes: number;
-  /** 本次模型下载耗时（毫秒；命中缓存时为 0 或首次加载耗时） */
-  downloadMs: number;
-  /** 推理耗时（毫秒） */
+  /** 处理耗时（毫秒） */
   inferenceMs: number;
-  /** 是否命中了缓存（同一张裁剪图重复请求时为 true） */
-  cached: boolean;
-}
-
-export class AiUnavailableError extends Error {
-  readonly reason: 'model-download-failed' | 'backend-init-failed' | 'unsupported' | 'aborted';
-  constructor(reason: AiUnavailableError['reason'], message: string) {
-    super(message);
-    this.name = 'AiUnavailableError';
-    this.reason = reason;
-  }
 }

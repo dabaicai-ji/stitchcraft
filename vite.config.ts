@@ -86,16 +86,6 @@ function buildInfo(): { hash: string; time: string } {
   }
 }
 
-/**
- * 跨源隔离开关：开启后 SharedArrayBuffer 可用 → onnxruntime 多线程（numThreads 可到 4）。
- * 本地也开，才能复现线上行为。风险：COEP 会拦掉没有 CORP 头的跨域资源。
- * 站内资源（模型/字体/wasm/api）都是同源，理论上安全。
- */
-const isolationHeaders = {
-  'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Embedder-Policy': 'require-corp',
-}
-
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const apiKey = env.DEEPSEEK_API_KEY ?? process.env.DEEPSEEK_API_KEY
@@ -106,8 +96,6 @@ export default defineConfig(({ mode }) => {
     define: {
       __BUILD_INFO__: JSON.stringify(info),
     },
-    server: { headers: isolationHeaders },
-    preview: { headers: isolationHeaders },
     build: {
       // pdf-lib + fontkit 是有意按需加载的大块，已单独分包
       chunkSizeWarningLimit: 1600,

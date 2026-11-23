@@ -1,7 +1,8 @@
 # 端侧 AI 风格化 —— 决策记录与验证报告
 
-> 状态：**验证阶段完成，尚未接入管线（等接线任务）**。
-> 本文所有体积/耗时/碎片率都是本机实测，不是估算。评测日期 2026-11-17。
+> 状态：**本地 ONNX 方案已下线（2026-11-17 决策，2026-11-23 执行完毕）**。
+> 现在本地只剩**像素模式**（纯 TS、0 下载）；卡通改走云端图生图，横评尚未开跑。
+> 本文所有体积/耗时/碎片率都是本机实测，不是估算。
 
 ## 0. 已确认的方向（用户决策）
 
@@ -124,10 +125,30 @@ AnimeGANv2 上游（TachibanaYoshino/AnimeGANv2）**未声明 LICENSE**，权重
 `models.ts` 的 `license.note` 已标注「【仅比赛/内测】」。
 **公网上线前必须替换为许可干净的模型，或摘掉卡通功能。** 像素模式无此问题（自有代码）。
 
-## 11. 方向调整：本地 ONNX 下线，改云端图像编辑 API（2026-11-17）
+## 11. 方向调整：本地 ONNX 下线，改云端图像编辑 API（2026-11-17 决策，2026-11-23 执行）
 
-本地 AnimeGANv2 实测效果不达标（人像在细网格下反而更碎、风格不可控），**下线**：
-删除 `public/models/*.onnx`、移除 onnxruntime-web 依赖与 `/assets/*.wasm`（≈43MB），像素模式保留作兜底。
+本地 AnimeGANv2 实测效果不达标（人像在细网格下反而更碎、风格不可控），**已下线**。
+
+执行清单（2026-11-23）：
+
+| 移除项 | 结果 |
+|---|---|
+| `public/models/animeganv2-face-paint-512.onnx` | 已删（8.2MB） |
+| `onnxruntime-web` 依赖 | 已卸载，node_modules 374MB → 130MB |
+| `src/ai/runtime.ts` / `models.ts` / `cache.ts` / `transforms.ts` | 已删（ORT 加载、模型注册表、IndexedDB 缓存、AnimeGAN 前后处理） |
+| `scripts/copy-ort-wasm.ts` + `prebuild` 钩子 | 已删 |
+| 5 个只服务 ORT 的实验脚本（exp-onnx / exp-ai-quality / exp-ai-matrix / exp-p2p / exp-p2p-quality） | 已删，结论留在本文 |
+| COOP/COEP（vite dev/preview + netlify） | 已移除：本为 ORT 多线程而设，下线后无收益且 COEP 会拦跨域资源 |
+| UI 的卡通选项、22.4MB 确认弹窗、下载进度/跳过/重试、8 秒自动关闭 | 已移除 |
+
+保留：`src/ai/pixelate.ts`（纯 TS 像素化）、`src/ai/ai.worker.ts`（只跑像素化）、
+`src/ai/client.ts`（`applyPixelStyle`）、`src/ai/types.ts`。
+
+体积验证：`dist` 从 **51.5MB → 1.56MB**（主包 330KB / gzip 107KB + PDF 分包 1.14MB），
+构建产物中不再含任何 `.wasm` / `.onnx`。
+
+新增测试：`npm run itest:pixel`（`scripts/itest-pixel.ts`）验证像素化可复现、块化生效、
+以及像素化结果能直接进现有管线且色号全部合法。
 
 改调云端图生图 API，先做 0 元横评（脚本 `scripts/exp-cloud-compare.ts`）：
 
@@ -159,7 +180,7 @@ AnimeGANv2 上游（TachibanaYoshino/AnimeGANv2）**未声明 LICENSE**，权重
 ## 12. 剩余待办
 
 - [ ] **横评**：填 `ARK_API_KEY` / `DASHSCOPE_API_KEY` 后跑 `scripts/exp-cloud-compare.ts`，出对比图定方案
-- [ ] **下线本地 ONNX**：删 `public/models/`、卸载 onnxruntime-web、移除 `src/ai` 里卡通相关代码（省 ≈43MB wasm + 8.2MB 模型）
+- [x] **下线本地 ONNX**：已完成（2026-11-23），详见 §11
 - [ ] 云端接线：`POST /api/ai-style` 建任务返 taskId、`GET ?taskId` 查询、前端轮询（不在 edge 同步等 15s）
 - [ ] 客户端上传前压到长边 1024 / JPEG 0.85；结果键 `sha256(裁剪图+风格+提示词)` 缓存
 - [ ] 成本护栏：每设备/IP 每天 5 次，超限或失败降级本地像素；UI 明示「图片会上传到云端处理」

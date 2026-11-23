@@ -21,9 +21,8 @@ import { DEFAULT_PARAMS } from './core/pipeline/run.ts';
 import type { PipelineOutput, PipelineParams } from './core/pipeline/run.ts';
 import { DMC_META } from './core/palette/dmc.ts';
 import { runPipelineInWorker } from './lib/workerClient.ts';
-import { applyAiStyle, disposeAi, warmModel } from './ai/client.ts';
-import type { WarmInfo } from './ai/client.ts';
-import type { AiProgress, AiStyle, AiStyleResult } from './ai/types.ts';
+import { applyPixelStyle, disposeAi } from './ai/client.ts';
+import type { AiStyle, AiStyleResult } from './ai/types.ts';
 import { BUILD_INFO, debugEnabled, deviceLine } from './lib/env.ts';
 import { buildThreadCsv, downloadCsv } from './render/exportCsv.ts';
 import { loadPdfFont } from './render/pdf/font.ts';
@@ -52,17 +51,12 @@ export default function App() {
   const [suggested, setSuggested] = useState<number | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
 
-  // ---- AI 风格化 ----
+  // ---- 风格化（像素模式：纯本地，0 下载）----
   const [aiStyle, setAiStyle] = useState<AiStyle>('none');
-  const [aiProgress, setAiProgress] = useState<AiProgress | null>(null);
-  const [aiWarm, setAiWarm] = useState<WarmInfo | null>(null);
   const [aiLast, setAiLast] = useState<AiStyleResult | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [aiBusy, setAiBusy] = useState(false);
   const [aiRunning, setAiRunning] = useState(false);
-  const [aiSlowWarn, setAiSlowWarn] = useState(false);
   const [aiBaseline, setAiBaseline] = useState<number | null>(null);
-  const aiStartRef = useRef(0);
 
   const firstRunRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -129,45 +123,12 @@ export default function App() {
     }
   }, [source, replaceUrl]);
 
-  /* ---------------- AI 风格化 ---------------- */
-  const chooseAiStyle = useCallback(async (next: AiStyle) => {
+  /* ---------------- 风格化（像素模式） ---------------- */
+  const chooseAiStyle = useCallback((next: AiStyle) => {
     setAiError(null);
-    if (next === 'none') {
-      setAiStyle('none');
-      disposeAi();
-      setAiWarm(null);
-      setAiProgress(null);
-      return;
-    }
-    // 像素模式：0 下载，不 warm（它没有模型）
-    if (next === 'pixel') {
-      setAiStyle('pixel');
-      return;
-    }
-
-    // 卡通：先下载模型再切换，失败保持原样
-    setAiBusy(true);
-    aiStartRef.current = performance.now();
-    try {
-      const info = await warmModel('anime', setAiProgress);
-      setAiWarm(info);
-      setAiStyle('anime');
-      setAiSlowWarn(false);
-    } catch (err) {
-      setAiError(`模型加载失败：${err instanceof Error ? err.message : String(err)}`);
-      setAiStyle('none');
-    } finally {
-      setAiBusy(false);
-      setAiProgress(null);
-    }
-  }, []);
-
-  const skipAiDownload = useCallback(() => {
-    disposeAi();
-    setAiBusy(false);
-    setAiProgress(null);
-    setAiRunning(false);
-    setAiStyle('none');
+    // 关闭时立刻释放 Worker；像素模式本身 0 下载、无模型可加载
+    if (next === 'none') disposeAi();
+    setAiStyle(next);
   }, []);
 
   /* ---------------- 跑管线 ---------------- */
@@ -183,30 +144,22 @@ export default function App() {
           abortRef.current = ctrl;
           setBusy(true);
 
-          // ---- 可选：先做 AI 风格化（结果直接替换 RGBA，下游不用改）----
+          // ---- 可选：先做像素化（结果直接替换 RGBA，下游不用改）----
           let inputRgba = source.rgba;
-          if (aiStyle !== 'none') {
+          if (aiStyle === 'pixel') {
             setAiRunning(true);
             try {
-              const styled = await applyAiStyle({
-                style: aiStyle,
+              const styled = await applyPixelStyle({
                 rgba: source.rgba,
                 width: source.width,
                 height: source.height,
                 gridWidth: params.targetWidth,
-                cacheKey: crop
-                  ? `${crop.x},${crop.y},${crop.width},${crop.height}`
-                  : undefined,
-                onProgress: setAiProgress,
               });
               inputRgba = styled.rgba;
               setAiLast(styled);
-              setAiProgress(null);
             } catch (err) {
-              if (!(err instanceof DOMException && err.name === 'AbortError')) {
-                setAiError(err instanceof Error ? err.message : String(err));
-                setAiStyle('none');
-              }
+              setAiError(err instanceof Error ? err.message : String(err));
+              setAiStyle('none');
               setAiRunning(false);
               setBusy(false);
               return;
@@ -227,19 +180,9 @@ export default function App() {
             if (out.suggestedColors) setSuggested(out.suggestedColors);
             firstRunRef.current = false;
             setBusy(false);
-            // 关闭 AI 时的碎片率作为对照基线（约束①：如实显示前后两个数字）
+            // 不启用风格化时的碎片率作为对照基线（约束①：如实显示前后两个数字）
             if (aiStyle === 'none') {
               setAiBaseline(out.report.continuity.confettiRatio);
-            }
-
-            // 8 秒规则：从点开启卡通到出图超过 8 秒 → 自动关掉（可恢复，不静默记住）
-            if (aiStyle === 'anime' && aiStartRef.current > 0) {
-              const elapsed = performance.now() - aiStartRef.current;
-              if (elapsed > 8000) {
-                setAiStyle('none');
-                setAiSlowWarn(true);
-              }
-              aiStartRef.current = 0;
             }
           } catch (err) {
             if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -252,7 +195,7 @@ export default function App() {
     );
 
     return () => window.clearTimeout(timer);
-  }, [source, params, stage, aiStyle, crop]);
+  }, [source, params, stage, aiStyle]);
 
   const onChange = useCallback((patch: Partial<PipelineParams>) => {
     setParams((prev) => ({ ...prev, ...patch }));
@@ -402,16 +345,9 @@ export default function App() {
           {stage === 'result' && (
             <AiStylePanel
               style={aiStyle}
-              onChoose={(next) => void chooseAiStyle(next)}
-              progress={aiProgress}
+              onChoose={chooseAiStyle}
               running={aiRunning}
-              busy={aiBusy}
               error={aiError}
-              onRetry={() => void chooseAiStyle('anime')}
-              onSkip={skipAiDownload}
-              slowWarn={aiSlowWarn}
-              onRecover={() => void chooseAiStyle('anime')}
-              warmInfo={aiWarm}
               lastResult={aiLast}
               debug={debugEnabled}
               baselineConfetti={aiBaseline}
