@@ -96,10 +96,43 @@ export interface AiStyleDeps {
   store: TaskStore;
   /** 后台执行器：Netlify 里触发 background function；本地直接在当前进程跑 */
   launch: (taskId: string) => void | Promise<void>;
+  /**
+   * 免配额设备名单（开发机 / 演示机）。
+   * **只从服务端环境变量 AI_STYLE_UNLIMITED_DEVICE_IDS 解析出来**，
+   * 前端代码里不许出现任何设备 ID 常量，也不提供查询接口。
+   */
+  unlimitedDeviceIds?: readonly string[];
   /** 测试用：echo 回显输入图（不联网）、timeout 永远不完成（验降级） */
   mock?: MockMode;
   fetchImpl?: typeof fetch;
   now?: () => number;
+}
+
+/**
+ * 解析 AI_STYLE_UNLIMITED_DEVICE_IDS：逗号分隔，容忍空格、换行、重复。
+ * 空值 / 未配置 → 空数组（行为与没有这个功能时完全一致）。
+ */
+export function parseUnlimitedDevices(raw: string | undefined | null): string[] {
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const part of raw.split(/[,\n;]/)) {
+    const id = part.trim();
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * 当前请求设备是否免配额。
+ * 只做**精确匹配**，不做前缀/模糊匹配——避免「多打一个字符就白名单命中」。
+ */
+export function isUnlimitedDevice(
+  deps: AiStyleDeps,
+  deviceId: string | undefined,
+): boolean {
+  const id = (deviceId ?? '').trim();
+  if (!id) return false;
+  return (deps.unlimitedDeviceIds ?? []).includes(id);
 }
 
 /* ---------------- 工具 ---------------- */
@@ -518,9 +551,14 @@ async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Respon
     'unknown';
   const bucket = deviceId ? `dev:${deviceId}` : `ip:${ip}`;
 
-  const used = await deps.store.getQuota(bucket, day);
+  // 开发机 / 演示机白名单：只认环境变量里的精确匹配。
+  // 命中则完全跳过 getQuota / incrQuota —— 既不检查也不扣减，
+  // 名单为空时这个分支永远不走，行为与没有该功能时一致。
+  const unlimited = isUnlimitedDevice(deps, deviceId);
+
+  const used = unlimited ? 0 : await deps.store.getQuota(bucket, day);
   // 只按「真正要调上游的张数」检查额度：两路都命中缓存时 costImages = 0，永不 429
-  if (used + costImages > DAILY_IMAGE_LIMIT) {
+  if (!unlimited && used + costImages > DAILY_IMAGE_LIMIT) {
     return json(429, {
       error: `今日 AI 插画次数已用完（每天 ${DAILY_RUN_LIMIT} 次，每次 ${IMAGES_PER_RUN} 张）`,
       code: 'QUOTA_EXCEEDED',
@@ -538,8 +576,8 @@ async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Respon
     });
   }
 
-  // 只扣真正要调上游的张数（命中缓存的那路不收费）
-  if (costImages > 0) await deps.store.incrQuota(bucket, day, costImages);
+  // 只扣真正要调上游的张数（命中缓存的那路不收费）；白名单设备不扣
+  if (!unlimited && costImages > 0) await deps.store.incrQuota(bucket, day, costImages);
 
   const id = randomId();
   const task: CloudTask = {
@@ -570,7 +608,9 @@ async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Respon
     size: task.size,
     candidates: prefilled.length + pending.length,
     cost: costImages * COST_PER_IMAGE,
-    quotaLeft: runsLeft(used + costImages),
+    // 白名单设备不限次：quotaLeft 明确返回 null，前端据此显示「无限额度」
+    unlimited,
+    quotaLeft: unlimited ? null : runsLeft(used + costImages),
   });
 }
 
@@ -620,6 +660,11 @@ async function handleStatus(request: Request, deps: AiStyleDeps): Promise<Respon
     pickedId: task.pickedId,
     error: task.error,
     mock: task.mock ?? false,
+    // 轮询也带白名单标记：前端刷新后重新轮询仍知道自己是无限额度
+    unlimited: isUnlimitedDevice(
+      deps,
+      (request.headers.get('x-device-id') ?? '').trim(),
+    ),
   };
 
   if (task.status === 'failed') {

@@ -12,16 +12,24 @@
  * 环境变量：ARK_API_KEY（只在这里读，前端永远拿不到）
  */
 
-import { handleAiStyle } from '../../api/_lib/aiStyle.ts';
+import { handleAiStyle, parseUnlimitedDevices } from '../../api/_lib/aiStyle.ts';
 import { BlobsTaskStore } from './_lib/blobsStore.ts';
 
 /** Netlify 注入的站点地址（e.g. https://xxx.netlify.app），用于回调自己的后台函数 */
 const SELF_BASE = process.env.URL ?? '';
 
+/**
+ * 免配额设备名单（开发机 / 演示机）。
+ * 只在这里从环境变量读出来，**不向前端暴露名单内容**：
+ * 前端只能通过提交/轮询响应里的 `unlimited: true|false` 知道「自己是否命中」。
+ */
+const UNLIMITED_DEVICES = parseUnlimitedDevices(process.env.AI_STYLE_UNLIMITED_DEVICE_IDS);
+
 export default async function handler(req: Request): Promise<Response> {
   return handleAiStyle(req, {
     apiKey: process.env.ARK_API_KEY,
     store: new BlobsTaskStore(),
+    unlimitedDeviceIds: UNLIMITED_DEVICES,
     launch: async (taskId: string): Promise<void> => {
       if (!SELF_BASE) {
         throw new Error('缺少 Netlify 的 URL 环境变量，无法触发后台函数');

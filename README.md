@@ -232,6 +232,7 @@ https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC
 | 去重 | 按档位分别缓存「用户选中的那张」：A 命中 B 未命中时只调 1 次、只扣 1 张；两路都命中 0 元 |
 | 降级 | 超时（客户端 70s）/ 两张都失败 / 配额用完 → 自动切回像素并提示，不白屏 |
 | Key | 只在服务端环境变量，浏览器只认 `/api/ai-style` |
+| 免配额 | 开发机/演示机：服务端环境变量 `AI_STYLE_UNLIMITED_DEVICE_IDS`（逗号分隔，精确匹配）。`?debug=1` 面板可复制自己的设备 ID；名单不下发到浏览器 |
 
 产品定位（重要）：AI 插画的收益是**相邻色不再糊成一团**，不是降碎片。A/B 双档实测（120 格）：
 

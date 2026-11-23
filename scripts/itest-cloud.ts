@@ -87,6 +87,7 @@ function okBody(seed: number): Response {
 function makeDeps(
   mock: AiStyleDeps['mock'],
   fetchImpl?: typeof fetch,
+  unlimitedDeviceIds?: string[],
 ): { deps: AiStyleDeps; upstreamCalls: () => number } {
   const store = new MemoryTaskStore();
   let calls = 0;
@@ -97,6 +98,7 @@ function makeDeps(
       void runCloudTask(taskId, deps);
     },
     mock,
+    unlimitedDeviceIds,
     now: () => Date.now(),
     // 真实调用会被替换成桩；mock 模式下不会被调用
     fetchImpl:
@@ -414,6 +416,72 @@ console.log(`\n[8] 每日配额（每天 ${DAILY_RUN_LIMIT} 次 × ${IMAGES_PER_
     { 'x-device-id': 'device-B' },
   );
   check('换设备号不受影响', other.status === 201, `实际 ${other.status}`);
+}
+
+/* ---------------- 8b. 免配额设备白名单 ---------------- */
+
+console.log('\n[8b] 免配额设备（服务端环境变量白名单，精确匹配 x-device-id）');
+{
+  const WHITE = 'dev-whitelist-001';
+  // 名单里混入空白项，验证解析容错（parseUnlimitedDevices 会过滤掉）
+  const { deps } = makeDeps('echo', undefined, [WHITE, '', '  ']);
+  const day = new Date().toISOString().slice(0, 10);
+
+  const statuses: number[] = [];
+  let sawUnlimited = false;
+  let sawNullQuota = false;
+  for (let i = 0; i < 7; i++) {
+    const r = await submit(
+      deps,
+      { image: fakeJpeg(i + 40), width: 1024, height: 768, key: sha(400 + i) },
+      { 'x-device-id': WHITE },
+    );
+    statuses.push(r.status);
+    if (r.json.unlimited === true) sawUnlimited = true;
+    if (r.json.quotaLeft === null) sawNullQuota = true;
+  }
+  check('白名单设备连发 7 次全部 201', statuses.every((s) => s === 201), statuses.join(','));
+  check('响应标注 unlimited=true', sawUnlimited);
+  check('白名单设备 quotaLeft 为 null（不限次）', sawNullQuota);
+  const whiteUsed = await deps.store.getQuota(`dev:${WHITE}`, day);
+  check('白名单设备额度完全未扣', whiteUsed === 0, `实际 ${whiteUsed}`);
+
+  // 名单外设备：6 张额度 = 3 次，第 4 次该被拦
+  const outsider = { 'x-device-id': 'device-outsider' };
+  const oss: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const r = await submit(
+      deps,
+      { image: fakeJpeg(i + 60), width: 1024, height: 768, key: sha(500 + i) },
+      outsider,
+    );
+    oss.push(r.status);
+  }
+  check('名单外前 3 次正常', oss.slice(0, 3).every((s) => s === 201), oss.join(','));
+  check('名单外第 4 次被拦（429）', oss[3] === 429, oss.join(','));
+  const blackUsed = await deps.store.getQuota('dev:device-outsider', day);
+  check(
+    `名单外设备照常扣满 ${DAILY_IMAGE_LIMIT} 张`,
+    blackUsed === DAILY_IMAGE_LIMIT,
+    `实际 ${blackUsed}`,
+  );
+
+  // 白名单只做精确匹配，不做前缀
+  const prefix = await submit(
+    deps,
+    { image: fakeJpeg(70), width: 1024, height: 768, key: sha(600) },
+    { 'x-device-id': `${WHITE}-copy` },
+  );
+  check('前缀相近的设备号不命中白名单', prefix.json.unlimited === false, String(prefix.json.unlimited));
+
+  // 名单为空时行为不变（与没有该功能一致）
+  const { deps: emptyDeps } = makeDeps('echo', undefined, []);
+  const plain = await submit(
+    emptyDeps,
+    { image: fakeJpeg(80), width: 1024, height: 768, key: sha(700) },
+    { 'x-device-id': WHITE },
+  );
+  check('名单为空时同设备号不受影响', plain.status === 201 && plain.json.unlimited === false);
 }
 
 /* ---------------- 9. 超时任务停在 running ---------------- */

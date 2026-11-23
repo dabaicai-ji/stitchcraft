@@ -5,7 +5,7 @@ import { execSync } from 'node:child_process'
 import { Readable } from 'node:stream'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { handleInsight } from './api/_lib/insight.ts'
-import { handleAiStyle, runCloudTask } from './api/_lib/aiStyle.ts'
+import { handleAiStyle, parseUnlimitedDevices, runCloudTask } from './api/_lib/aiStyle.ts'
 import type { AiStyleDeps, MockMode } from './api/_lib/aiStyle.ts'
 import { MemoryTaskStore } from './api/_lib/taskStore.ts'
 
@@ -88,12 +88,17 @@ function parseMock(raw: string | undefined): MockMode {
  * 本地没有 Netlify Background Function：用同一个 Node 进程里的 setTimeout 模拟
  * 「登记后立刻返回、后台继续跑」的语义。dev server 不退出，任务就能跑完。
  */
-function createAiStyleDeps(apiKey: string | undefined, mock: MockMode): AiStyleDeps {
+function createAiStyleDeps(
+  apiKey: string | undefined,
+  mock: MockMode,
+  unlimitedDeviceIds: string[],
+): AiStyleDeps {
   const store = new MemoryTaskStore()
   const deps: AiStyleDeps = {
     apiKey,
     store,
     mock,
+    unlimitedDeviceIds,
     launch: (taskId: string): void => {
       setTimeout(() => {
         void runCloudTask(taskId, deps)
@@ -127,7 +132,11 @@ export default defineConfig(({ mode }) => {
   const deepseekKey = env.DEEPSEEK_API_KEY ?? process.env.DEEPSEEK_API_KEY
   const arkKey = env.ARK_API_KEY ?? process.env.ARK_API_KEY
   const mock = parseMock(env.AI_STYLE_MOCK ?? process.env.AI_STYLE_MOCK)
-  const aiDeps = createAiStyleDeps(arkKey, mock)
+  // 免配额设备名单：只读环境变量，前端永远拿不到；为空时行为与没有该功能一致
+  const unlimited = parseUnlimitedDevices(
+    env.AI_STYLE_UNLIMITED_DEVICE_IDS ?? process.env.AI_STYLE_UNLIMITED_DEVICE_IDS,
+  )
+  const aiDeps = createAiStyleDeps(arkKey, mock, unlimited)
   const info = buildInfo()
 
   return {

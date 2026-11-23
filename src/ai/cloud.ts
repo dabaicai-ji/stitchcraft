@@ -87,6 +87,8 @@ export interface CloudMeta {
   size: string;
   cached: boolean;
   quotaLeft: number | null;
+  /** 本设备在服务端白名单里（免配额）。名单内容不下发，只有这个布尔值 */
+  unlimited: boolean;
   mock: boolean;
   serverMs: number;
 }
@@ -112,8 +114,10 @@ export interface CloudRunResult {
   candidates: CloudCandidateView[];
   /** 服务端是否命中缓存（命中则本次不计费） */
   cached: boolean;
-  /** 今日剩余次数（缓存命中时为 null） */
+  /** 今日剩余次数（缓存命中或白名单设备时为 null） */
   quotaLeft: number | null;
+  /** 本设备免配额 */
+  unlimited: boolean;
   mock: boolean;
   serverMs: number;
   /** 缓存命中时服务端带回来的上次选中项 */
@@ -134,8 +138,11 @@ export interface CloudPickResult {
 /**
  * 设备 ID 只用于「每天 3 次、每次 2 张」的配额，不做任何追踪。
  * 隐私模式下 localStorage 可能抛异常，退化成 anonymous（服务端会按 IP 兜底）。
+ *
+ * 对外导出是为了 `?debug=1` 面板能显示并复制它——服务端的免配额名单需要这个 ID，
+ * 而名单本身永远不会下发到浏览器。
  */
-function deviceId(): string {
+export function getDeviceId(): string {
   try {
     const existing = localStorage.getItem(DEVICE_KEY);
     if (existing) return existing;
@@ -238,7 +245,10 @@ interface SubmitResponse {
   cached?: boolean;
   size?: string;
   cost?: number;
-  quotaLeft?: number;
+  /** 白名单设备为 null（不限次） */
+  quotaLeft?: number | null;
+  /** 服务端判定本设备免配额（只在响应里告知结果，不下发名单本身） */
+  unlimited?: boolean;
   pickedId?: string;
   candidates?: number;
   error?: string;
@@ -256,10 +266,11 @@ interface StatusResponse {
   mock?: boolean;
   elapsedMs?: number;
   upstreamMs?: number;
+  unlimited?: boolean;
 }
 
 function deviceHeaders(): Record<string, string> {
-  return { 'Content-Type': 'application/json', 'x-device-id': deviceId() };
+  return { 'Content-Type': 'application/json', 'x-device-id': getDeviceId() };
 }
 
 async function submit(
@@ -317,7 +328,7 @@ async function pollUntilDone(
     let res: Response;
     try {
       res = await fetch(`${ENDPOINT}?taskId=${encodeURIComponent(taskId)}`, {
-        headers: { 'x-device-id': deviceId() },
+        headers: { 'x-device-id': getDeviceId() },
         signal,
       });
     } catch (err) {
@@ -456,6 +467,7 @@ export async function submitCloud(opts: CloudStyleOptions): Promise<CloudRunResu
     candidates,
     cached: Boolean(submitted.cached),
     quotaLeft: typeof submitted.quotaLeft === 'number' ? submitted.quotaLeft : null,
+    unlimited: Boolean(submitted.unlimited ?? status.unlimited),
     mock: Boolean(status.mock),
     serverMs: status.elapsedMs ?? 0,
     pickedId: status.pickedId ?? submitted.pickedId ?? null,

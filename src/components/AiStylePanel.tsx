@@ -11,8 +11,10 @@
  * 没选之前管线不跑，也不会写缓存。
  */
 
+import { useState } from 'react';
 import type { AiStyle, AiStyleResult } from '../ai/types.ts';
 import type { CloudMeta, CloudRunResult } from '../ai/cloud.ts';
+import { getDeviceId } from '../ai/cloud.ts';
 import { deviceLine } from '../lib/env.ts';
 
 interface Props {
@@ -41,6 +43,23 @@ interface Props {
 
 export function AiStylePanel(props: Props) {
   const { style, onChoose, running, error, cloudPending, cloudRun, pickedId } = props;
+  const [copied, setCopied] = useState(false);
+
+  /** 复制设备 ID：服务端免配额白名单要的就是这串，别让用户手抄 */
+  const copyDeviceId = (): void => {
+    const id = getDeviceId();
+    try {
+      void navigator.clipboard?.writeText(id).then(
+        () => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        },
+        () => setCopied(false),
+      );
+    } catch {
+      setCopied(false);
+    }
+  };
 
   const options = [
     ['none', '原始', '不启用风格化，直接走原图'],
@@ -155,9 +174,12 @@ export function AiStylePanel(props: Props) {
               </div>
               <div>
                 今日剩余：
-                {props.cloudMeta?.quotaLeft === null || props.cloudMeta?.quotaLeft === undefined
-                  ? '—'
-                  : `${props.cloudMeta.quotaLeft} 次`}
+                {props.cloudMeta?.unlimited
+                  ? '无限额度'
+                  : props.cloudMeta?.quotaLeft === null ||
+                      props.cloudMeta?.quotaLeft === undefined
+                    ? '—'
+                    : `${props.cloudMeta.quotaLeft} 次`}
               </div>
             </>
           ) : (
@@ -167,6 +189,13 @@ export function AiStylePanel(props: Props) {
             </>
           )}
           <div>设备：{deviceLine()}</div>
+          <div className="ai-device">
+            设备 ID：<code>{getDeviceId()}</code>
+            <button type="button" className="ai-device-copy" onClick={copyDeviceId}>
+              {copied ? '已复制' : '复制'}
+            </button>
+            {props.cloudMeta?.unlimited && <span className="ai-unlimited">无限额度</span>}
+          </div>
         </div>
       )}
     </div>

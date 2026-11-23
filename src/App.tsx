@@ -245,6 +245,7 @@ export default function App() {
           size: run.size,
           cached: run.cached,
           quotaLeft: run.quotaLeft,
+          unlimited: run.unlimited,
           mock: run.mock,
           serverMs: run.serverMs,
         });
