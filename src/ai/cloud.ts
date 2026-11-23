@@ -326,7 +326,43 @@ async function pollUntilDone(
 
 /* ---------------- 解码 ---------------- */
 
-async function decodeToRgba(dataUrl: string): Promise<{
+/**
+ * 解码 dataURL 为 RGBA。
+ *
+ * ⚠️ `target` 不是可选的「优化」——它是正确性的一部分。
+ * 云端图的尺寸（如 1368×1024）和裁剪源图尺寸（如 2000×1500）**不是一回事**，
+ * 而下游管线是按调用方声明的 srcWidth/srcHeight 去解释 stride 的。
+ * 直接把云端图 RGBA 交给管线 → 每行错位 → 画面糊成一片（实测事故，见 AI_STYLIZE.md）。
+ *
+ * 所以这里按 target 做 **cover**：等比放大到铺满目标、居中裁掉溢出部分。
+ * 用 cover 不用 stretch，是因为请求尺寸本来就按裁剪比例算，两者比例几乎相同，
+ * 裁掉的部分 <1%；而拉伸会引入肉眼可见的几何变形，对刺绣图案是硬伤。
+ */
+/**
+ * cover 缩放的目标矩形（纯函数，便于单测）。
+ *
+ * 返回把 srcW×srcH 等比放大到**完全覆盖** dstW×dstH 后的绘制矩形，
+ * 居中放置 → 多出来的部分被裁掉（x/y 会是负数或 0）。
+ *
+ * 为什么用 cover 而不是 stretch：请求尺寸本来就按裁剪比例算，两者比例几乎相同，
+ * cover 只会裁掉 <1% 的边缘；stretch 会引入肉眼可见的几何变形，对刺绣图案是硬伤。
+ */
+export function coverRect(
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number,
+): { x: number; y: number; w: number; h: number } {
+  const scale = Math.max(dstW / srcW, dstH / srcH);
+  const w = srcW * scale;
+  const h = srcH * scale;
+  return { x: (dstW - w) / 2, y: (dstH - h) / 2, w, h };
+}
+
+async function decodeToRgba(
+  dataUrl: string,
+  target?: { width: number; height: number },
+): Promise<{
   rgba: Uint8ClampedArray;
   width: number;
   height: number;
@@ -334,14 +370,26 @@ async function decodeToRgba(dataUrl: string): Promise<{
   const blob = await (await fetch(dataUrl)).blob();
   const bitmap = await createImageBitmap(blob);
   try {
+    const width = target?.width ?? bitmap.width;
+    const height = target?.height ?? bitmap.height;
+
     const canvas = document.createElement('canvas');
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new CloudError('encode', '画布不可用，无法解码云端结果');
-    ctx.drawImage(bitmap, 0, 0);
-    const img = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-    return { rgba: img.data, width: bitmap.width, height: bitmap.height };
+
+    if (target) {
+      const r = coverRect(bitmap.width, bitmap.height, width, height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bitmap, r.x, r.y, r.w, r.h);
+    } else {
+      ctx.drawImage(bitmap, 0, 0);
+    }
+
+    const img = ctx.getImageData(0, 0, width, height);
+    return { rgba: img.data, width, height };
   } finally {
     bitmap.close();
   }
@@ -396,10 +444,16 @@ export async function submitCloud(opts: CloudStyleOptions): Promise<CloudRunResu
   };
 }
 
-/** 用户点选某张候选：服务端记 pickedId + 写缓存，本地解码成 RGBA。 */
+/**
+ * 用户点选某张候选：服务端记 pickedId + 写缓存，本地解码成 RGBA。
+ *
+ * `target` 必须传**裁剪源图的尺寸**：云端图会被 cover 缩放到这个尺寸，
+ * 保证交给管线的 RGBA 与 srcWidth/srcHeight 自洽（尺寸不自洽就会糊图）。
+ */
 export async function pickCandidate(
   taskId: string,
   candidateId: string,
+  target?: { width: number; height: number },
   signal?: AbortSignal,
 ): Promise<CloudPickResult> {
   let res: Response;
@@ -427,7 +481,7 @@ export async function pickCandidate(
   }
   if (!data.image) throw new CloudError('upstream', '服务端没有返回选中的图');
 
-  const decoded = await decodeToRgba(data.image);
+  const decoded = await decodeToRgba(data.image, target);
   return {
     ...decoded,
     size: data.size ?? `${decoded.width}x${decoded.height}`,

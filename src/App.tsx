@@ -185,10 +185,19 @@ export default function App() {
   /** 选中一张候选：服务端记 pickedId + 写缓存，本地解码成 RGBA 进管线 */
   const pickAndApply = useCallback(
     async (taskId: string, candidateId: string): Promise<void> => {
+      if (!source) {
+        setAiError('缺少源图尺寸，无法把云端图归一到源尺寸');
+        return;
+      }
       setCloudPicking(true);
       setAiError(null);
       try {
-        const picked = await pickCandidate(taskId, candidateId);
+        // 关键：云端图（如 1368×1024）必须 cover 缩放到裁剪源图尺寸（如 2000×1500），
+        // 否则下游按 srcWidth 解释 stride 会逐行错位 —— 实测就是「画面糊成一片」。
+        const picked = await pickCandidate(taskId, candidateId, {
+          width: source.width,
+          height: source.height,
+        });
         const styled = toAiStyleResult(picked, 0);
         setCloudPickedId(candidateId);
         setAiLast(styled);

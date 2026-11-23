@@ -21,6 +21,23 @@ export interface RunOptions {
 }
 
 export function runPipelineInWorker(opts: RunOptions): Promise<PipelineOutput> {
+  /**
+   * 尺寸自洽断言 —— 这不是防御性冗余，是踩过一次的真事故：
+   * 云端 AI 图（1368×1024）的 RGBA 被当成裁剪源图（2000×1500）交给管线，
+   * Worker 按 srcWidth 算 stride → 每行错位 → 画面糊成一片，而且**不报错**。
+   * 宁可在这里直接抛，也不要让错位静默流到用户的图纸上。
+   */
+  const expected = opts.srcWidth * opts.srcHeight * 4;
+  if (opts.rgba.length !== expected) {
+    return Promise.reject(
+      new Error(
+        `像素缓冲与声明的源尺寸不一致：rgba.length=${opts.rgba.length}，` +
+          `期望 ${opts.srcWidth}×${opts.srcHeight}×4=${expected}。` +
+          '调用方必须先把图像归一化到源尺寸（见 src/ai/cloud.ts 的 decodeToRgba）。',
+      ),
+    );
+  }
+
   return new Promise<PipelineOutput>((resolve, reject) => {
     if (opts.signal?.aborted) {
       reject(new DOMException('已取消', 'AbortError'));
