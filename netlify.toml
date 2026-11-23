@@ -7,6 +7,22 @@
   function = "insight"
   path = "/api/insight"
 
+# ---------------------------------------------------------------------------
+# 云端 AI 插画：普通 Function（提交 / 轮询）+ Background Function（真正调火山）
+#
+# 为什么是两种函数：Seedream 单张 8–15s，普通 Function 免费版 10s 超时；
+# ai-style-run-background 由平台回 202、后台继续跑到 15 分钟。
+# 目录约定：netlify/functions/*.ts（_ 开头的目录/文件不会被当成函数）
+# ---------------------------------------------------------------------------
+[functions]
+  directory = "netlify/functions"
+
+[[redirects]]
+  from = "/api/ai-style"
+  to = "/.netlify/functions/ai-style"
+  status = 200
+  force = true
+
 [build.environment]
   NODE_VERSION = "22"
 

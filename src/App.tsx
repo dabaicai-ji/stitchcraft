@@ -23,6 +23,8 @@ import { DMC_META } from './core/palette/dmc.ts';
 import { runPipelineInWorker } from './lib/workerClient.ts';
 import { applyPixelStyle, disposeAi } from './ai/client.ts';
 import type { AiStyle, AiStyleResult } from './ai/types.ts';
+import { applyCloudStyle, CloudError, toCloudMeta } from './ai/cloud.ts';
+import type { CloudMeta } from './ai/cloud.ts';
 import { BUILD_INFO, debugEnabled, deviceLine } from './lib/env.ts';
 import { buildThreadCsv, downloadCsv } from './render/exportCsv.ts';
 import { loadPdfFont } from './render/pdf/font.ts';
@@ -51,12 +53,24 @@ export default function App() {
   const [suggested, setSuggested] = useState<number | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
 
-  // ---- 风格化（像素模式：纯本地，0 下载）----
+  // ---- 风格化（像素：纯本地 0 下载 / AI 插画：云端上传，约 0.2 元一张）----
   const [aiStyle, setAiStyle] = useState<AiStyle>('none');
   const [aiLast, setAiLast] = useState<AiStyleResult | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiRunning, setAiRunning] = useState(false);
   const [aiBaseline, setAiBaseline] = useState<number | null>(null);
+  /** 已点「AI 插画」但用户还没确认上传：确认前一个字节都不发 */
+  const [cloudPending, setCloudPending] = useState(false);
+  const [cloudMeta, setCloudMeta] = useState<CloudMeta | null>(null);
+  /**
+   * 云端结果按「同一张裁剪图」缓存。
+   * 必须缓存：改色数 / 改格数会重跑整条管线，但绝不能因此再付一次 0.2 元。
+   */
+  const cloudRef = useRef<{
+    source: SourceImage | null;
+    result: AiStyleResult | null;
+    meta: CloudMeta | null;
+  }>({ source: null, result: null, meta: null });
 
   const firstRunRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -123,17 +137,32 @@ export default function App() {
     }
   }, [source, replaceUrl]);
 
-  /* ---------------- 风格化（像素模式） ---------------- */
-  const chooseAiStyle = useCallback((next: AiStyle) => {
-    setAiError(null);
-    // 关闭时立刻释放 Worker；像素模式本身 0 下载、无模型可加载
-    if (next === 'none') disposeAi();
-    setAiStyle(next);
+  /* ---------------- 风格化 ---------------- */
+  const chooseAiStyle = useCallback(
+    (next: AiStyle) => {
+      if (next === aiStyle) return; // 点当前已选中的选项不重复触发
+      setAiError(null);
+      // AI 插画要上传到云端而且计费：先出确认条，用户确认后才发请求
+      setCloudPending(next === 'cloud');
+      // 关闭时立刻释放 Worker；像素模式本身 0 下载、无模型可加载
+      if (next === 'none') disposeAi();
+      setAiStyle(next);
+    },
+    [aiStyle],
+  );
+
+  const confirmCloudStyle = useCallback(() => setCloudPending(false), []);
+
+  const cancelCloudStyle = useCallback(() => {
+    setCloudPending(false);
+    setAiStyle('none');
   }, []);
 
   /* ---------------- 跑管线 ---------------- */
   useEffect(() => {
     if (!source || stage !== 'result') return;
+    // AI 插画：用户还没点「开始处理」前，一个字节都不离开浏览器
+    if (aiStyle === 'cloud' && cloudPending) return;
 
     const wantSuggestion = firstRunRef.current;
     const timer = window.setTimeout(
@@ -144,7 +173,7 @@ export default function App() {
           abortRef.current = ctrl;
           setBusy(true);
 
-          // ---- 可选：先做像素化（结果直接替换 RGBA，下游不用改）----
+          // ---- 可选：先做风格化（结果直接替换 RGBA，下游不用改）----
           let inputRgba = source.rgba;
           if (aiStyle === 'pixel') {
             setAiRunning(true);
@@ -165,6 +194,49 @@ export default function App() {
               return;
             }
             setAiRunning(false);
+          } else if (aiStyle === 'cloud') {
+            const cached = cloudRef.current;
+            if (cached.source === source && cached.result) {
+              // 同一张裁剪图：复用已经付过费的结果，绝不重复调云端
+              inputRgba = cached.result.rgba;
+              setAiLast(cached.result);
+              setCloudMeta(cached.meta);
+            } else {
+              setAiRunning(true);
+              try {
+                const styled = await applyCloudStyle({
+                  rgba: source.rgba,
+                  width: source.width,
+                  height: source.height,
+                  signal: ctrl.signal,
+                });
+                inputRgba = styled.rgba;
+                const meta = toCloudMeta(styled);
+                cloudRef.current = { source, result: styled, meta };
+                setAiLast(styled);
+                setCloudMeta(meta);
+                setAiError(null);
+              } catch (err) {
+                if (err instanceof DOMException && err.name === 'AbortError') {
+                  setAiRunning(false);
+                  setBusy(false);
+                  return;
+                }
+                const msg =
+                  err instanceof CloudError
+                    ? err.message
+                    : err instanceof Error
+                      ? err.message
+                      : String(err);
+                // 失败 / 超时 / 配额用完：自动降级像素，不白屏也不让用户手动再点一次
+                setAiError(`${msg} · 已自动切回像素模式`);
+                setAiRunning(false);
+                setBusy(false);
+                setAiStyle('pixel');
+                return;
+              }
+              setAiRunning(false);
+            }
           }
 
           try {
@@ -195,7 +267,7 @@ export default function App() {
     );
 
     return () => window.clearTimeout(timer);
-  }, [source, params, stage, aiStyle]);
+  }, [source, params, stage, aiStyle, cloudPending]);
 
   const onChange = useCallback((patch: Partial<PipelineParams>) => {
     setParams((prev) => ({ ...prev, ...patch }));
@@ -346,9 +418,13 @@ export default function App() {
             <AiStylePanel
               style={aiStyle}
               onChoose={chooseAiStyle}
+              cloudPending={cloudPending}
+              onConfirmCloud={confirmCloudStyle}
+              onCancelCloud={cancelCloudStyle}
               running={aiRunning}
               error={aiError}
               lastResult={aiLast}
+              cloudMeta={cloudMeta}
               debug={debugEnabled}
               baselineConfetti={aiBaseline}
               currentConfetti={result?.report.continuity.confettiRatio ?? null}

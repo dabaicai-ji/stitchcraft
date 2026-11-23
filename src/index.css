@@ -1079,6 +1079,39 @@ select {
   cursor: default;
 }
 
+/* 云端计费确认条：点「AI 插画」后才出现，确认前不发起任何上传 */
+.ai-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid rgba(212, 160, 60, 0.35);
+  border-radius: 7px;
+  background: rgba(212, 160, 60, 0.08);
+}
+
+.ai-confirm p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-dim);
+}
+
+.ai-confirm p strong {
+  color: var(--text);
+}
+
+.ai-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ai-confirm-actions .btn-primary,
+.ai-confirm-actions .btn-ghost {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
 .ai-progress-text {
   font-size: 11px;
   color: var(--text-dim);
