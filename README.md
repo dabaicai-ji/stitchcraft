@@ -3,10 +3,10 @@
 十字绣图纸生成器 V1 —— 上传图片 → 裁剪取景 →（可选）像素 / AI 插画风格化 → 保边平滑 → 感知减色到**真实 DMC 线号** → 网格图纸 + 可绣性报告 + A4 分页 PDF + AI 解读。
 
 **像素模式与全部图纸计算都在本机完成**，图片不出浏览器。两个例外都是显式可选的：
-「AI 插画」会把裁剪图上传到火山云处理（约 0.2 元/张，必须用户确认才开始）、
+「AI 插画」会把裁剪图上传到火山云处理（每次生成 2 张候选、约 0.4 元，必须用户确认才开始）、
 「AI 解读」只发送指标 JSON 不上传图片。没有 API Key 时除这两项外全部功能可用。
 
-`npm test` 覆盖指标单测、真实照片端到端、PDF，以及云端任务的服务端契约（46 项断言，不联网、不花钱）。
+`npm test` 覆盖指标单测、真实照片端到端、PDF，以及云端任务的服务端契约（74 项断言，不联网、不花钱）。
 像素风格化另有 `npm run itest:pixel`。
 
 ## 快速开始
@@ -200,17 +200,20 @@ https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC
 ## 云端 AI 插画（火山 Seedream 4.0）
 
 第三个风格选项，**默认关闭**：点「AI 插画」→ 弹出计费确认 → 用户点「开始处理」才上传。
+一次生成 **2 张候选**（火山 `n` 参数无效，服务端并行发两次），并排展示，用户点选后才进管线。
 
 ```
 裁剪图 RGBA ──► 压到长边 1024 / JPEG 0.85 ──► sha256(图+提示词) 作缓存键
   └─► POST /api/ai-style { image, key, width, height }
-        ├─ 命中缓存：直接回同一 taskId，不扣配额、不调云端
-        ├─ 未命中：登记任务、扣配额、返回 taskId
-        └─ 触发 background function → 调 Seedream（实测 8–18s）→ 结果图回流成 base64 存 Blobs
-  └─► GET /api/ai-style?taskId= 每 1.5s 轮询 → done 拿 dataURL → 解码 RGBA → 现有管线
+        ├─ 命中缓存：直接回同一 taskId + 上次选中的 pickedId，不扣配额、不调云端
+        ├─ 未命中：登记任务、扣 2 张额度、返回 taskId
+        └─ 触发 background function → **并行调两次** Seedream（各 8–23s）→ 两张结果图回流成 base64 存 Blobs
+  └─► GET /api/ai-style?taskId= 每 1.5s 轮询 → done/partial 拿 2 个候选 dataURL
+  └─► 用户点选 ──► POST /api/ai-style?action=pick { taskId, candidateId }
+        └─ 记 pickedId + 写缓存 ──► 解码选中那张 → 现有管线
 ```
 
-为什么要绕这么大一圈：Seedream 是**同步接口**、单张 8–18 秒，而 Netlify 普通 Function
+为什么要绕这么大一圈：Seedream 是**同步接口**、单张 8–23 秒，而 Netlify 普通 Function
 免费版 **10 秒**就切断。所以真正干活的是 `ai-style-run-background`（文件名带 `-background`
 是 Netlify 约定，返回后仍可跑 15 分钟），任务状态存 Netlify Blobs，本地 dev 用内存 store 等价模拟。
 
@@ -218,16 +221,16 @@ https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC
 
 | 护栏 | 实现 |
 |---|---|
-| 计费确认 | 必须点「开始处理」，文案写明「上传到火山云、约 0.2 元/张」 |
-| 配额 | 每设备（localStorage UUID）/ IP 每天 5 次，超限 429 → 自动降级像素 |
-| 去重 | 服务端按 `sha256` 键复用结果，同图重试 0 元 |
-| 降级 | 超时（客户端 70s）/ 失败 / 配额用完 → 自动切回像素并提示，不白屏 |
+| 计费确认 | 必须点「开始处理」，文案写明「每次生成 2 张、约 0.4 元」 |
+| 配额 | 每设备（localStorage UUID）/ IP 每天 **3 次 × 2 张 = 6 张**，超限 429 → 自动降级像素 |
+| 去重 | 服务端按 `sha256` 键复用**用户选中的那张**，同图重试 0 元；未选中的候选不进缓存 |
+| 降级 | 超时（客户端 70s）/ 两张都失败 / 配额用完 → 自动切回像素并提示，不白屏 |
 | Key | 只在服务端环境变量，浏览器只认 `/api/ai-style` |
 
-产品定位（重要）：AI 插画的收益是**相邻色不再糊成一团**——三段式提示词实测把混淆边比
-压到 1.2%（120 格，源图 0.2%、无风格段时 8.7%）、难度 2★；但**碎片率会略微上升**
-（源图 4.1% → AI 插画 8.4%，因为风格化与保人物同时要，细节就多）。所以文案只讲「更像图纸」，
-**禁止**写「降碎片」。完整实测、三版提示词对比与成本表见 `AI_STYLIZE.md` §12–§13。
+产品定位（重要）：AI 插画的收益是**相邻色不再糊成一团**，不是降碎片。极简像素风实测
+（120 格）：碎片 9.0%、混淆边比 1.2%、难度 2★；200 格：碎片 4.4%、混淆 3.2%、难度 2★。
+文案只讲「更像图纸」，**禁止**写「降碎片」。完整实测、四版提示词对比与成本表见
+`AI_STYLIZE.md` §12–§14。
 
 部署范围：这条链路目前只做了 **Netlify（Functions + Blobs + Background Function）与本地 dev**。
 如果改用 Vercel，`api/ai-style` 需要另写一份 Edge/Serverless 适配，否则 AI 插画会 404
@@ -267,7 +270,7 @@ https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC
   注意默认平滑 0.4 会整体拉低碎片率，阈值目前仍是「绝对质量门槛」而非分位数
 - 线量为几何估算（14ct/2 股 ≈ 599 格/束），保守取值，待真实作品标定
 - AI 解读只做了 V1 单轮；多轮对话式调参（模型主动追问）未实现
-- 风格化两个选项：**像素**（本地纯 TS、0 下载）与 **AI 插画**（云端火山 Seedream，约 0.2 元/张）。
+- 风格化两个选项：**像素**（本地纯 TS、0 下载）与 **AI 插画**（云端火山 Seedream，每次 2 张约 0.4 元、每天 3 次）。
   本地 ONNX 卡通分支已下线（实测不降碎片、代价 51.5MB、许可灰区），见 `AI_STYLIZE.md`
 - AI 插画的真机体验未验证（本机无浏览器）：手机端上传、轮询、17.8s 级等待都只做了构建级与 Node 级验证
 - 云端任务在 Blobs 里没有 TTL 清理，量大时需要加定时清理

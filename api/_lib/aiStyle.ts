@@ -3,10 +3,10 @@
  *
  * 用 Web 标准 Request / Response 编写，和 insight.ts 同一套思路，一份代码跑三处：
  *   本地 dev / preview : vite.config.ts 里的 Node 桥接层（内存 store + 进程内后台执行）
- *   Netlify            : netlify/functions/ai-style.ts（提交/查询）+ ai-style-run-background.ts（后台执行）
+ *   Netlify            : netlify/functions/ai-style.ts（提交/查询/选择）+ ai-style-run-background.ts（后台执行）
  *   Node 测试          : scripts/itest-cloud.ts 直接喂 Request
  *
- * 三个关键设计，都被现实约束逼出来的：
+ * 四个关键设计，都被现实约束逼出来的：
  *
  * 1) **异步任务，不是一次请求等 15 秒。**
  *    火山 Seedream 是同步接口，单张 8–15s；Netlify 普通 Function 免费版 10s 超时。
@@ -14,50 +14,56 @@
  *    （Netlify 上文件名带 -background 的函数，返回 202 后还能继续跑，最长 15 分钟）。
  *    本地没有 background 机制，launch 直接在当前 Node 进程里跑，语义一致。
  *
- * 2) **输入图与任务分键存。**
- *    轮询每 2 秒一次，任务 JSON 里不该带 300KB 输入图。
+ * 2) **一次生成两张候选，并行两路。**
+ *    火山 Seedream 4.0 的 `n` 参数无效（实测 n=2 只返回 1 张），所以服务端
+ *    用 Promise.all 并行发两次、每次 n 默认 1 张。两路互不拖累：一路失败不影响另一路。
+ *    耗时约等于单次（并行），成本翻倍（0.4 元/次）。
  *
- * 3) **结果图立刻回流。**
- *    火山返回的是 24 小时失效的 URL，服务端下载后转 base64 存起来，
- *    前端永远拿不到那个临时 URL——它过期了我们也不会跟着坏。
+ * 3) **选中之后才写缓存。**
+ *    一次出两张，未选中的那张用户根本没见过——它不是「有效产出」。
+ *    所以 cache:<sha256> 只在 pick 时写入；同一张输入图第二次提交会命中
+ *    用户上次选中的那张，不再重复计费，也不会命中一张没人选过的图。
+ *
+ * 4) **输入图与任务分键存。** 轮询每 1.5 秒一次，任务 JSON 里不该带 300KB 输入图。
  */
 
-import type { CloudTask, TaskStore } from './taskStore.ts';
+import type { CloudCandidate, CloudTask, TaskStore } from './taskStore.ts';
 
 /* ---------------- 常量（照横评实测，不随意改） ---------------- */
 
 export const CLOUD_MODEL = 'doubao-seedream-4-0-20260415';
 /**
- * 提示词（2026-11-23 第二次换版：三段式）。
+ * 提示词（2026-11-23 第三版：极简像素风）。
  *
- * 版本演进，两次都是实测驱动的：
+ * 版本演进，每一次都是实测驱动的：
  *   V1「扁平插画风 + 硬边大色块」——人物被简化掉（脸和口罩糊成抽象色面）。
  *   V2「只保人物、去掉风格」——人物完整了，但风格约束消失后模型画得更写实，
  *      细节变多 → 混淆边比从 0.9% 涨到 8.7%。**风格和主体是并列约束，不是二选一。**
- *   V3（当前）三段分开写，各管一段：
- *      【风格】决定色块形态（硬边大色块 → 相近色更容易被合并）
- *      【主体】决定画什么（不许省略/简化/替换人物）
- *      【构图】决定怎么摆（取景、人物大小、裁切比例）
- *   最后一句收口：12 色 + 无文字边框。
+ *   V3「风格 + 主体 + 构图」三段式——人物完整、混淆压回 1.2%，但碎片率 8.4%、构图仍会漂。
+ *   V4（当前）改成极简像素风：先要「像图纸」，背景压成纯色块、只留主体轮廓。
+ *      这是产品定位的转向——不是让照片变好看，而是让它变成能直接绣的图纸。
  *
  * ⚠️ 这段文字同时是缓存键的一部分（sha256 里含 prompt），
  * 与 src/ai/cloud.ts 的 CLOUD_PROMPT 必须逐字一致，itest-cloud 有断言守着。
  */
 export const CLOUD_PROMPT =
-  '【风格】把这张照片改成扁平插画风，硬边、大色块、边缘干净；\n' +
-  '【主体】完整保留人物的形态、面部、姿态和服装，不要省略、简化或替换人物；\n' +
-  '【构图】保持原图的取景、人物大小与画面裁切比例，只简化背景与织物纹理；\n' +
-  '颜色不超过 12 种，不要文字、不要边框。';
+  '把照片转成极简像素风图纸：背景去掉或简化为纯色块，只保留主体轮廓；减少杂色、用大块纯色、硬边、边缘干净；颜色不超过 12 种；保持原图取景与主体位置；不要文字、不要边框。';
 export const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 
-/** 每设备 / IP 每天的次数上限（成本护栏） */
-export const DAILY_LIMIT = 5;
+/** 一次生成几张候选（并行发几次请求） */
+export const IMAGES_PER_RUN = 2;
+/** 每设备 / IP 每天可用的**张数**上限（成本护栏） */
+export const DAILY_IMAGE_LIMIT = 6;
+/** 对外口径：每天可生成几次（每次 2 张） */
+export const DAILY_RUN_LIMIT = DAILY_IMAGE_LIMIT / IMAGES_PER_RUN;
+/** 单张成本（元），仅用于文案 */
+export const COST_PER_IMAGE = 0.2;
+/** 一次生成（2 张）的成本 */
+export const COST_PER_RUN = COST_PER_IMAGE * IMAGES_PER_RUN;
 /** Seedream 要求的最小总像素 */
 export const MIN_PIXELS = 921600;
 /** 请求体上限：1024 长边 JPEG 约 300–500KB，base64 后 ~700KB，留足余量 */
 const MAX_BODY = 8 * 1024 * 1024;
-/** 单张成本（元），仅用于文案 */
-export const COST_PER_IMAGE = 0.2;
 
 export type MockMode = 'echo' | 'timeout' | null;
 
@@ -250,13 +256,63 @@ function now(deps: AiStyleDeps): number {
 export const POLL_TIMEOUT_MS = 60_000;
 
 /**
- * 执行一个任务。可重入：已 done / failed 的任务直接跳过，
+ * 跑单路候选。**绝不让它抛**——一路失败不能拖垮另一路，
+ * 这是「一张成功就展示一张」的前提。
+ */
+async function runCandidate(
+  deps: AiStyleDeps,
+  opts: { id: string; input: string; prompt: string; size: string },
+): Promise<CloudCandidate> {
+  const t0 = now(deps);
+  try {
+    if (deps.mock === 'echo') {
+      // 回显：链路验证用，不产生费用，也不假装是风格化效果
+      await sleep(400);
+      const bytes = Buffer.from(opts.input, 'base64');
+      return {
+        id: opts.id,
+        ok: true,
+        image: opts.input,
+        imageMime: sniffMime(bytes),
+        imageBytes: bytes.length,
+        upstreamMs: 400,
+      };
+    }
+    if (!deps.apiKey) throw new Error('ARK_API_KEY 未配置');
+    const r = await callSeedream({
+      apiKey: deps.apiKey,
+      inputBase64: opts.input,
+      prompt: opts.prompt,
+      size: opts.size,
+      fetchImpl: deps.fetchImpl ?? fetch,
+      now: () => now(deps),
+    });
+    return {
+      id: opts.id,
+      ok: true,
+      image: r.image,
+      imageMime: r.mime,
+      imageBytes: r.bytes,
+      upstreamMs: r.upstreamMs,
+    };
+  } catch (err) {
+    return {
+      id: opts.id,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      upstreamMs: now(deps) - t0,
+    };
+  }
+}
+
+/**
+ * 执行一个任务。可重入：已 done / partial / failed 的任务直接跳过，
  * 因为 background function 可能被重复触发（Netlify 不保证只触发一次）。
  */
 export async function runCloudTask(taskId: string, deps: AiStyleDeps): Promise<void> {
   const task = await deps.store.getTask(taskId);
   if (!task) return;
-  if (task.status === 'done' || task.status === 'failed') return;
+  if (task.status === 'done' || task.status === 'partial' || task.status === 'failed') return;
 
   const t0 = now(deps);
   await deps.store.putTask({
@@ -273,45 +329,30 @@ export async function runCloudTask(taskId: string, deps: AiStyleDeps): Promise<v
     const input = await deps.store.getInput(taskId);
     if (!input) throw new Error('任务输入已丢失（可能已过期）');
 
-    let result: SeedreamResult;
-    if (deps.mock === 'echo') {
-      // 回显：链路验证用，不产生费用，也不假装是风格化效果
-      await sleep(400);
-      const bytes = Buffer.from(input, 'base64');
-      result = {
-        image: input,
-        mime: sniffMime(bytes),
-        bytes: bytes.length,
-        upstreamMs: 400,
-      };
-    } else {
-      if (!deps.apiKey) throw new Error('ARK_API_KEY 未配置');
-      result = await callSeedream({
-        apiKey: deps.apiKey,
-        inputBase64: input,
-        prompt: task.prompt,
-        size: task.size,
-        fetchImpl: deps.fetchImpl ?? fetch,
-        now: () => now(deps),
-      });
-    }
+    // 并行两路：火山 n 参数无效，只能发两次；Promise.all 保证总耗时 ≈ 单次
+    const ids = Array.from({ length: IMAGES_PER_RUN }, (_, i) => `c${i + 1}`);
+    const candidates = await Promise.all(
+      ids.map((id) =>
+        runCandidate(deps, { id, input, prompt: task.prompt, size: task.size }),
+      ),
+    );
 
+    const okCount = candidates.filter((c) => c.ok).length;
     const t1 = now(deps);
     await deps.store.putTask({
       ...task,
-      status: 'done',
-      image: result.image,
-      imageMime: result.mime,
-      imageBytes: result.bytes,
-      upstreamMs: result.upstreamMs,
+      status: okCount === 0 ? 'failed' : okCount === candidates.length ? 'done' : 'partial',
+      candidates,
+      okCount,
+      error:
+        okCount === 0
+          ? candidates.map((c) => c.error).filter(Boolean).join(' | ') || '所有候选都失败'
+          : undefined,
       finishedAt: t1,
       updatedAt: t1,
     });
     await deps.store.dropInput(taskId);
-    // 只有真实产出才进缓存；echo mock 不该污染真实结果
-    if (deps.mock !== 'echo') {
-      await deps.store.putCachedTaskId(task.key, taskId);
-    }
+    // ⚠️ 这里**不写缓存**：缓存只在用户 pick 之后写入（见 handlePick）。
   } catch (err) {
     const t1 = now(deps);
     await deps.store.putTask({
@@ -334,8 +375,18 @@ interface SubmitBody {
   key?: unknown;
 }
 
+interface PickBody {
+  taskId?: unknown;
+  candidateId?: unknown;
+}
+
 function isHex64(v: unknown): v is string {
   return typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
+}
+
+/** 剩余「次数」（对外口径），按张数折算 */
+function runsLeft(used: number): number {
+  return Math.max(0, Math.floor((DAILY_IMAGE_LIMIT - used) / IMAGES_PER_RUN));
 }
 
 async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Response> {
@@ -365,12 +416,18 @@ async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Respon
   const cachedId = await deps.store.getCachedTaskId(body.key);
   if (cachedId) {
     const cached = await deps.store.getTask(cachedId);
-    if (cached && cached.status === 'done') {
+    if (
+      cached &&
+      (cached.status === 'done' || cached.status === 'partial') &&
+      cached.pickedId &&
+      cached.candidates?.some((c) => c.id === cached.pickedId && c.ok)
+    ) {
       return json(200, {
         taskId: cached.id,
-        status: 'done',
+        status: cached.status,
         cached: true,
         cost: 0,
+        pickedId: cached.pickedId,
       });
     }
   }
@@ -387,13 +444,13 @@ async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Respon
   const bucket = deviceId ? `dev:${deviceId}` : `ip:${ip}`;
 
   const used = await deps.store.getQuota(bucket, day);
-  if (used >= DAILY_LIMIT) {
+  if (used + IMAGES_PER_RUN > DAILY_IMAGE_LIMIT) {
     return json(429, {
-      error: `今日 AI 插画次数已用完（每天 ${DAILY_LIMIT} 次）`,
+      error: `今日 AI 插画次数已用完（每天 ${DAILY_RUN_LIMIT} 次，每次 ${IMAGES_PER_RUN} 张）`,
       code: 'QUOTA_EXCEEDED',
       fallback: 'pixel',
-      limit: DAILY_LIMIT,
-      used,
+      limit: DAILY_RUN_LIMIT,
+      used: Math.floor(used / IMAGES_PER_RUN),
     });
   }
 
@@ -405,7 +462,8 @@ async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Respon
     });
   }
 
-  await deps.store.incrQuota(bucket, day);
+  // 每次生成扣 2 张额度
+  await deps.store.incrQuota(bucket, day, IMAGES_PER_RUN);
 
   const id = randomId();
   const task: CloudTask = {
@@ -431,9 +489,25 @@ async function handleSubmit(request: Request, deps: AiStyleDeps): Promise<Respon
     status: 'queued',
     cached: false,
     size: task.size,
-    cost: COST_PER_IMAGE,
-    quotaLeft: Math.max(0, DAILY_LIMIT - used - 1),
+    candidates: IMAGES_PER_RUN,
+    cost: COST_PER_RUN,
+    quotaLeft: runsLeft(used + IMAGES_PER_RUN),
   });
+}
+
+/** 候选对前端暴露的形态：成功的带 data URL，失败的只带错误 */
+function candidatesForClient(task: CloudTask): unknown[] {
+  return (task.candidates ?? []).map((c) =>
+    c.ok && c.image
+      ? {
+          id: c.id,
+          ok: true,
+          image: `data:${c.imageMime ?? 'image/jpeg'};base64,${c.image}`,
+          bytes: c.imageBytes ?? 0,
+          upstreamMs: c.upstreamMs ?? 0,
+        }
+      : { id: c.id, ok: false, error: c.error ?? '未知错误' },
+  );
 }
 
 async function handleStatus(request: Request, deps: AiStyleDeps): Promise<Response> {
@@ -449,18 +523,15 @@ async function handleStatus(request: Request, deps: AiStyleDeps): Promise<Respon
     status: task.status,
     size: task.size,
     elapsedMs: (task.finishedAt ?? nowMs) - task.createdAt,
-    upstreamMs: task.upstreamMs,
+    okCount: task.okCount,
+    candidates: task.status === 'running' || task.status === 'queued'
+      ? undefined
+      : candidatesForClient(task),
+    pickedId: task.pickedId,
     error: task.error,
     mock: task.mock ?? false,
   };
 
-  if (task.status === 'done' && task.image) {
-    return json(200, {
-      ...base,
-      image: `data:${task.imageMime ?? 'image/jpeg'};base64,${task.image}`,
-      imageBytes: task.imageBytes,
-    });
-  }
   if (task.status === 'failed') {
     return json(200, { ...base, fallback: 'pixel' });
   }
@@ -468,13 +539,63 @@ async function handleStatus(request: Request, deps: AiStyleDeps): Promise<Respon
 }
 
 /**
- * 统一入口。GET = 查任务，POST = 提交任务。
+ * 用户点选某张候选。
  *
- * 注意 POST 的 201 只是「已登记」，不代表出图成功——
- * 前端必须轮询 GET，失败 / 超时 / 配额用完都走降级像素。
+ * 两个副作用，缺一不可：
+ *   1) 记录 pickedId —— 之后轮询/缓存命中都能拿到「用户选的是哪张」；
+ *   2) 写入 cache 键 —— 只有走到这一步的图才是有效产出，下次同图提交直接复用。
+ */
+async function handlePick(request: Request, deps: AiStyleDeps): Promise<Response> {
+  let body: PickBody;
+  try {
+    body = (await request.json()) as PickBody;
+  } catch {
+    return json(400, { error: '请求体解析失败' });
+  }
+  const taskId = typeof body.taskId === 'string' ? body.taskId : '';
+  const candidateId = typeof body.candidateId === 'string' ? body.candidateId : '';
+  if (!taskId || !candidateId) return json(400, { error: '缺少 taskId / candidateId' });
+
+  const task = await deps.store.getTask(taskId);
+  if (!task) return json(404, { error: '任务不存在或已过期（1 小时）' });
+  if (task.status !== 'done' && task.status !== 'partial') {
+    return json(409, { error: `任务还没出结果（当前 ${task.status}）` });
+  }
+  const candidate = task.candidates?.find((c) => c.id === candidateId && c.ok);
+  if (!candidate?.image) return json(400, { error: '候选不存在或生成失败' });
+
+  const t1 = now(deps);
+  await deps.store.putTask({ ...task, pickedId: candidateId, updatedAt: t1 });
+  // 选中即形成有效产出：写缓存（未选中的候选永远不进缓存）
+  await deps.store.putCachedTaskId(task.key, task.id);
+
+  return json(200, {
+    taskId: task.id,
+    candidateId,
+    status: 'picked',
+    image: `data:${candidate.imageMime ?? 'image/jpeg'};base64,${candidate.image}`,
+    bytes: candidate.imageBytes ?? 0,
+    size: task.size,
+    upstreamMs: candidate.upstreamMs ?? 0,
+    mock: task.mock ?? false,
+  });
+}
+
+/**
+ * 统一入口。
+ *
+ *   GET  /api/ai-style?taskId=            查任务（含候选项）
+ *   POST /api/ai-style                    提交任务（扣 2 张额度）
+ *   POST /api/ai-style?action=pick        选定一张候选（写缓存）
+ *
+ * 用 query 的 action 而不是子路径，是为了让 Netlify redirects 与本地桥接
+ * 都只需要一条 /api/ai-style 规则，少一处配置就少一处线上不一致。
  */
 export async function handleAiStyle(request: Request, deps: AiStyleDeps): Promise<Response> {
+  const action = new URL(request.url).searchParams.get('action');
   if (request.method === 'GET') return handleStatus(request, deps);
-  if (request.method === 'POST') return handleSubmit(request, deps);
-  return json(405, { error: '只支持 GET（查询）/ POST（提交）' });
+  if (request.method === 'POST') {
+    return action === 'pick' ? handlePick(request, deps) : handleSubmit(request, deps);
+  }
+  return json(405, { error: '只支持 GET（查询）/ POST（提交或选定）' });
 }

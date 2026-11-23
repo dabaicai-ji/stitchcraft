@@ -3,16 +3,19 @@
  *
  * 与前端的像素模式并列为第三个风格选项。整条链路：
  *   裁剪图 RGBA → 压到长边 1024 / JPEG 0.85 → 算 sha256 缓存键
- *     → POST /api/ai-style（登记任务，立即返回 taskId）
- *     → 轮询 GET /api/ai-style?taskId=（服务端 Background Function 在跑）
- *     → dataURL → ImageBitmap → RGBA → 交给下游 resizeToGrid / 量化 / 指标
+ *     → POST /api/ai-style（登记任务，立即返回 taskId，扣 2 张额度）
+ *     → 轮询 GET /api/ai-style?taskId=（服务端并行跑两路，各出一张）
+ *     → 得到 2 个候选 dataURL，**并排展示，等用户点选**
+ *     → POST /api/ai-style?action=pick（服务端记 pickedId 并写缓存）
+ *     → ImageBitmap → RGBA → 交给下游 resizeToGrid / 量化 / 指标
  *
- * 三条必须遵守的约定：
+ * 四条必须遵守的约定：
  *
  * 1) **Key 永不出现在这里。** 浏览器只认 /api/ai-style，ARK_API_KEY 只在服务端。
  * 2) **一次性付费的结果要能被复用。** 改色数 / 改格数会重跑整条管线，
- *    但绝不能因此重新调一次云端——App 侧按「同一张裁剪图」缓存结果 RGBA。
- * 3) **失败不白屏。** 超时 / 配额用完 / 上游报错都抛 CloudError，
+ *    但绝不能因此重新调一次云端——App 侧按「同一张裁剪图」缓存选中的 RGBA。
+ * 3) **选中才进管线。** 两张候选生成后停在「选择」状态，用户点了哪张才算数。
+ * 4) **失败不白屏。** 超时 / 配额用完 / 上游报错都抛 CloudError，
  *    由调用方降级到像素模式并提示一句。
  */
 
@@ -22,24 +25,21 @@ import type { AiStyleResult } from './types.ts';
  * 提示词必须与 api/_lib/aiStyle.ts 的 CLOUD_PROMPT 完全一致——
  * 它同时是缓存键的一部分，两边漂移会导致「同一张图重复计费」。
  * scripts/itest-cloud.ts 里有断言守着这件事。
- *
- * 2026-11-23 三段式换版：风格 / 主体 / 构图各管一段，缺一段就会互相压掉——
- * 删掉风格段 → 模型画得更写实、细节变多 → 混淆边比从 0.9% 涨到 8.7%；
- * 删掉主体段 → 人脸和服装被简化成抽象色块。详见 aiStyle.ts 的版本注释。
  */
 export const CLOUD_PROMPT =
-  '【风格】把这张照片改成扁平插画风，硬边、大色块、边缘干净；\n' +
-  '【主体】完整保留人物的形态、面部、姿态和服装，不要省略、简化或替换人物；\n' +
-  '【构图】保持原图的取景、人物大小与画面裁切比例，只简化背景与织物纹理；\n' +
-  '颜色不超过 12 种，不要文字、不要边框。';
+  '把照片转成极简像素风图纸：背景去掉或简化为纯色块，只保留主体轮廓；减少杂色、用大块纯色、硬边、边缘干净；颜色不超过 12 种；保持原图取景与主体位置；不要文字、不要边框。';
 
 /** 上传前的长边上限（压到 1024 后 JPEG 约 150–400KB） */
 export const MAX_UPLOAD_EDGE = 1024;
 export const JPEG_QUALITY = 0.85;
+/** 一次生成几张候选（与服务端 IMAGES_PER_RUN 对齐，仅用于文案与断言） */
+export const IMAGES_PER_RUN = 2;
+/** 一次生成的成本（元），仅用于文案 */
+export const COST_PER_RUN = 0.4;
 
 const ENDPOINT = '/api/ai-style';
 const POLL_INTERVAL_MS = 1500;
-/** 客户端比服务端更耐心一点：8–15s 出图 + 排队，70s 还没好就降级 */
+/** 客户端比服务端更耐心一点：两路并行约等于单次 8–20s，70s 还没好就降级 */
 const POLL_TIMEOUT_MS = 70_000;
 const DEVICE_KEY = 'sc_device_id';
 
@@ -81,7 +81,7 @@ export interface CloudStyleOptions {
   signal?: AbortSignal;
 }
 
-/** 调试面板要展示的元信息（不含 RGBA，避免把几百 KB 的像素塞进 React state） */
+/** 调试面板要展示的元信息（不把几百 KB 的 dataURL 塞进 state） */
 export interface CloudMeta {
   size: string;
   cached: boolean;
@@ -90,23 +90,42 @@ export interface CloudMeta {
   serverMs: number;
 }
 
-export interface CloudStyleResult extends AiStyleResult {
-  /** 火山实际生成的尺寸（服务端按裁剪比例算的） */
+/** 一个可展示的候选（缩略图用 dataURL，避免额外请求） */
+export interface CloudCandidateView {
+  id: string;
+  dataUrl: string;
+  bytes: number;
+  upstreamMs: number;
+}
+
+/** 一次生成的结果：两张候选 + 元信息 */
+export interface CloudRunResult {
+  taskId: string;
   size: string;
-  /** 是否命中服务端缓存（命中则本次不计费） */
+  candidates: CloudCandidateView[];
+  /** 服务端是否命中缓存（命中则本次不计费） */
   cached: boolean;
-  /** 剩余今日次数（服务端返回；缓存命中时为空） */
+  /** 今日剩余次数（缓存命中时为 null） */
   quotaLeft: number | null;
-  /** 服务端标记的 mock 任务（本地联调用） */
   mock: boolean;
-  /** 服务端记录的端到端耗时 */
   serverMs: number;
+  /** 缓存命中时服务端带回来的上次选中项 */
+  pickedId: string | null;
+}
+
+export interface CloudPickResult {
+  rgba: Uint8ClampedArray;
+  width: number;
+  height: number;
+  size: string;
+  bytes: number;
+  upstreamMs: number;
 }
 
 /* ---------------- 设备标识（限流用） ---------------- */
 
 /**
- * 设备 ID 只用于「每天 5 次」的配额，不做任何追踪。
+ * 设备 ID 只用于「每天 3 次、每次 2 张」的配额，不做任何追踪。
  * 隐私模式下 localStorage 可能抛异常，退化成 anonymous（服务端会按 IP 兜底）。
  */
 function deviceId(): string {
@@ -189,6 +208,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+interface CandidateWire {
+  id: string;
+  ok: boolean;
+  image?: string;
+  bytes?: number;
+  upstreamMs?: number;
+  error?: string;
+}
+
 interface SubmitResponse {
   taskId?: string;
   status?: string;
@@ -196,6 +224,8 @@ interface SubmitResponse {
   size?: string;
   cost?: number;
   quotaLeft?: number;
+  pickedId?: string;
+  candidates?: number;
   error?: string;
   code?: string;
 }
@@ -203,8 +233,10 @@ interface SubmitResponse {
 interface StatusResponse {
   taskId?: string;
   status?: string;
-  image?: string;
   size?: string;
+  okCount?: number;
+  candidates?: CandidateWire[];
+  pickedId?: string;
   error?: string;
   mock?: boolean;
   elapsedMs?: number;
@@ -246,7 +278,11 @@ async function submit(
   return data;
 }
 
-async function poll(
+/**
+ * 轮询直到出结果。
+ * done / partial 都算「出图完成」——partial 表示两路里有一路失败，仍有图可用。
+ */
+async function pollUntilDone(
   taskId: string,
   onProgress?: (p: CloudProgress) => void,
   signal?: AbortSignal,
@@ -277,7 +313,7 @@ async function poll(
     if (!res.ok) continue;
 
     const data = (await res.json().catch(() => ({}))) as StatusResponse;
-    if (data.status === 'done' && data.image) return data;
+    if (data.status === 'done' || data.status === 'partial') return data;
     if (data.status === 'failed') {
       throw new CloudError('upstream', data.error ?? '云端处理失败');
     }
@@ -290,7 +326,11 @@ async function poll(
 
 /* ---------------- 解码 ---------------- */
 
-async function decodeToRgba(dataUrl: string): Promise<AiStyleResult> {
+async function decodeToRgba(dataUrl: string): Promise<{
+  rgba: Uint8ClampedArray;
+  width: number;
+  height: number;
+}> {
   const blob = await (await fetch(dataUrl)).blob();
   const bitmap = await createImageBitmap(blob);
   try {
@@ -301,12 +341,7 @@ async function decodeToRgba(dataUrl: string): Promise<AiStyleResult> {
     if (!ctx) throw new CloudError('encode', '画布不可用，无法解码云端结果');
     ctx.drawImage(bitmap, 0, 0);
     const img = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
-    return {
-      rgba: img.data,
-      width: bitmap.width,
-      height: bitmap.height,
-      inferenceMs: 0,
-    };
+    return { rgba: img.data, width: bitmap.width, height: bitmap.height };
   } finally {
     bitmap.close();
   }
@@ -314,55 +349,102 @@ async function decodeToRgba(dataUrl: string): Promise<AiStyleResult> {
 
 /* ---------------- 对外主函数 ---------------- */
 
-export async function applyCloudStyle(opts: CloudStyleOptions): Promise<CloudStyleResult> {
-  const t0 = performance.now();
-
+/**
+ * 提交一次生成并等两张候选出来。
+ *
+ * 注意：这一步**不选图**，也没有进入本地管线——返回的是两个 dataURL，
+ * 交给 UI 并排展示，用户点选后再调 pickCandidate()。
+ */
+export async function submitCloud(opts: CloudStyleOptions): Promise<CloudRunResult> {
   opts.onProgress?.({ phase: 'encode' });
   const encoded = await toJpegBase64(opts.rgba, opts.width, opts.height);
   const key = await cacheKey(encoded.base64);
 
   opts.onProgress?.({ phase: 'submit' });
   const submitted = await submit(
-    {
-      image: encoded.base64,
-      key,
-      width: encoded.width,
-      height: encoded.height,
-    },
+    { image: encoded.base64, key, width: encoded.width, height: encoded.height },
     opts.signal,
   );
-
   const taskId = submitted.taskId!;
-  const progress: CloudProgress = { phase: 'polling', elapsedMs: 0 };
-  opts.onProgress?.(progress);
 
-  const status = await poll(taskId, opts.onProgress, opts.signal);
-  if (!status.image) throw new CloudError('upstream', '任务完成但没有返回图片');
+  // 命中缓存时服务端直接返回 200，但它不带图——仍要走一次轮询取候选
+  opts.onProgress?.({ phase: 'polling', elapsedMs: 0 });
+  const status = await pollUntilDone(taskId, opts.onProgress, opts.signal);
 
-  opts.onProgress?.({ phase: 'decode' });
-  const decoded = await decodeToRgba(status.image);
+  const candidates: CloudCandidateView[] = (status.candidates ?? [])
+    .filter((c) => c.ok && c.image)
+    .map((c) => ({
+      id: c.id,
+      dataUrl: c.image!,
+      bytes: c.bytes ?? 0,
+      upstreamMs: c.upstreamMs ?? 0,
+    }));
+
+  if (candidates.length === 0) {
+    throw new CloudError('upstream', status.error ?? '两张候选都生成失败');
+  }
 
   return {
-    ...decoded,
-    // 端到端耗时（编码 + 上传 + 等云端 + 解码），调试面板要看的就是它
-    inferenceMs: Math.round(performance.now() - t0),
-    size: status.size ?? submitted.size ?? `${decoded.width}x${decoded.height}`,
-    // 服务端「提交即命中缓存」时会返回 cached + 复用同一个 taskId，
-    // 此时 status.mock 可能为 undefined，用 submitted.cached 兜底
-    cached: Boolean(submitted.cached ?? false),
+    taskId,
+    size: status.size ?? submitted.size ?? `${encoded.width}x${encoded.height}`,
+    candidates,
+    cached: Boolean(submitted.cached),
     quotaLeft: typeof submitted.quotaLeft === 'number' ? submitted.quotaLeft : null,
     mock: Boolean(status.mock),
-    serverMs: status.elapsedMs ?? (status.upstreamMs ?? 0),
+    serverMs: status.elapsedMs ?? 0,
+    pickedId: status.pickedId ?? submitted.pickedId ?? null,
   };
 }
 
-/** 从完整结果里取出 UI 需要的元信息（RGBA 留给调用方，不进 state） */
-export function toCloudMeta(r: CloudStyleResult): CloudMeta {
+/** 用户点选某张候选：服务端记 pickedId + 写缓存，本地解码成 RGBA。 */
+export async function pickCandidate(
+  taskId: string,
+  candidateId: string,
+  signal?: AbortSignal,
+): Promise<CloudPickResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${ENDPOINT}?action=pick`, {
+      method: 'POST',
+      headers: deviceHeaders(),
+      body: JSON.stringify({ taskId, candidateId }),
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') throw err;
+    throw new CloudError('network', '无法连接服务端，请检查网络后重试');
+  }
+
+  const data = (await res.json().catch(() => ({}))) as {
+    image?: string;
+    size?: string;
+    bytes?: number;
+    upstreamMs?: number;
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new CloudError('upstream', data.error ?? `选定失败（HTTP ${res.status}）`);
+  }
+  if (!data.image) throw new CloudError('upstream', '服务端没有返回选中的图');
+
+  const decoded = await decodeToRgba(data.image);
   return {
-    size: r.size,
-    cached: r.cached,
-    quotaLeft: r.quotaLeft,
-    mock: r.mock,
-    serverMs: r.serverMs,
+    ...decoded,
+    size: data.size ?? `${decoded.width}x${decoded.height}`,
+    bytes: data.bytes ?? 0,
+    upstreamMs: data.upstreamMs ?? 0,
+  };
+}
+
+/** 把选中结果适配成管线使用的 AiStyleResult */
+export function toAiStyleResult(
+  picked: CloudPickResult,
+  endToEndMs: number,
+): AiStyleResult {
+  return {
+    rgba: picked.rgba,
+    width: picked.width,
+    height: picked.height,
+    inferenceMs: Math.round(endToEndMs),
   };
 }

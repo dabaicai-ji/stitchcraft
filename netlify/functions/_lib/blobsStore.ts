@@ -79,10 +79,10 @@ export class BlobsTaskStore implements TaskStore {
    * 一个 Durable Object / KV 原子计数」的成本。护栏目的是拦住刷量，不是
    * 做精确计费——真要精确计费应该以云厂商账单为准。
    */
-  async incrQuota(bucket: string, day: string): Promise<number> {
+  async incrQuota(bucket: string, day: string, n = 1): Promise<number> {
     const k = blobKey(`quota:${bucket}:${day}`);
     const current = Number((await this.store.get(k)) ?? 0) || 0;
-    const next = current + 1;
+    const next = current + n;
     await this.store.set(k, String(next));
     return next;
   }

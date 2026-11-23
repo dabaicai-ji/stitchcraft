@@ -23,8 +23,8 @@ import { DMC_META } from './core/palette/dmc.ts';
 import { runPipelineInWorker } from './lib/workerClient.ts';
 import { applyPixelStyle, disposeAi } from './ai/client.ts';
 import type { AiStyle, AiStyleResult } from './ai/types.ts';
-import { applyCloudStyle, CloudError, toCloudMeta } from './ai/cloud.ts';
-import type { CloudMeta } from './ai/cloud.ts';
+import { pickCandidate, submitCloud, toAiStyleResult } from './ai/cloud.ts';
+import type { CloudMeta, CloudRunResult } from './ai/cloud.ts';
 import { stylizeForMode } from './ai/stylizeMode.ts';
 import { BUILD_INFO, debugEnabled, deviceLine } from './lib/env.ts';
 import { buildThreadCsv, downloadCsv } from './render/exportCsv.ts';
@@ -54,7 +54,7 @@ export default function App() {
   const [suggested, setSuggested] = useState<number | null>(null);
   const [pdfBusy, setPdfBusy] = useState(false);
 
-  // ---- 风格化（像素：纯本地 0 下载 / AI 插画：云端上传，约 0.2 元一张）----
+  // ---- 风格化（像素：纯本地 0 下载 / AI 插画：云端上传，每次 2 张约 0.4 元）----
   const [aiStyle, setAiStyle] = useState<AiStyle>('none');
   const [aiLast, setAiLast] = useState<AiStyleResult | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -63,15 +63,23 @@ export default function App() {
   /** 已点「AI 插画」但用户还没确认上传：确认前一个字节都不发 */
   const [cloudPending, setCloudPending] = useState(false);
   const [cloudMeta, setCloudMeta] = useState<CloudMeta | null>(null);
+  /** 本次生成的两张候选（非 null 即进入「等用户点选」状态） */
+  const [cloudRun, setCloudRun] = useState<CloudRunResult | null>(null);
+  /** 用户已选中的候选 id —— 选中后管线才会跑 */
+  const [cloudPickedId, setCloudPickedId] = useState<string | null>(null);
+  /** 正在解码选中的那张图 */
+  const [cloudPicking, setCloudPicking] = useState(false);
   /**
    * 云端结果按「同一张裁剪图」缓存。
-   * 必须缓存：改色数 / 改格数会重跑整条管线，但绝不能因此再付一次 0.2 元。
+   * 必须缓存：改色数 / 改格数会重跑整条管线，但绝不能因此再付一次 0.4 元。
    */
   const cloudRef = useRef<{
     source: SourceImage | null;
+    pickedId: string | null;
     result: AiStyleResult | null;
-    meta: CloudMeta | null;
-  }>({ source: null, result: null, meta: null });
+  }>({ source: null, pickedId: null, result: null });
+  /** 提交云端请求的进行中标记：防止 effect 重入导致重复计费 */
+  const cloudInFlightRef = useRef(false);
 
   const firstRunRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -109,6 +117,10 @@ export default function App() {
       setSource(null);
       setResult(null);
       setSuggested(null);
+      // 换图 = 之前的云端候选与缓存全部作废（旧坐标/旧结果对新图无意义）
+      setCloudRun(null);
+      setCloudPickedId(null);
+      cloudRef.current = { source: null, pickedId: null, result: null };
       firstRunRef.current = true;
       setStage('crop');
     },
@@ -126,6 +138,10 @@ export default function App() {
       });
       setCrop(r.crop);
       setStage('result');
+      // 重新裁剪 = 新的构图：旧候选作废，避免拿错图去绣
+      setCloudRun(null);
+      setCloudPickedId(null);
+      cloudRef.current = { source: null, pickedId: null, result: null };
       firstRunRef.current = true;
     },
     [fileName],
@@ -166,6 +182,79 @@ export default function App() {
     setAiStyle('none');
   }, []);
 
+  /** 选中一张候选：服务端记 pickedId + 写缓存，本地解码成 RGBA 进管线 */
+  const pickAndApply = useCallback(
+    async (taskId: string, candidateId: string): Promise<void> => {
+      setCloudPicking(true);
+      setAiError(null);
+      try {
+        const picked = await pickCandidate(taskId, candidateId);
+        const styled = toAiStyleResult(picked, 0);
+        setCloudPickedId(candidateId);
+        setAiLast(styled);
+        cloudRef.current = { source, pickedId: candidateId, result: styled };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setAiError(`选定失败：${msg}`);
+      } finally {
+        setCloudPicking(false);
+      }
+    },
+    [source],
+  );
+
+  const handlePickCandidate = useCallback(
+    (candidateId: string) => {
+      if (!cloudRun) return;
+      void pickAndApply(cloudRun.taskId, candidateId);
+    },
+    [cloudRun, pickAndApply],
+  );
+
+  /**
+   * 提交云端生成（一次性付费）：确认后立刻跑，拿到两张候选就停在「等选择」。
+   * 同一张裁剪图只提交一次——cloudInFlightRef + cloudRef 双保险，
+   * 防止 effect 重入把一次生成变成两次计费。
+   */
+  useEffect(() => {
+    if (aiStyle !== 'cloud' || cloudPending || stage !== 'result' || !source) return;
+    if (cloudInFlightRef.current) return;
+    if (cloudRef.current.source === source && cloudRef.current.pickedId) return;
+
+    cloudInFlightRef.current = true;
+    void (async () => {
+      setAiRunning(true);
+      setAiError(null);
+      try {
+        const run = await submitCloud({
+          rgba: source.rgba,
+          width: source.width,
+          height: source.height,
+        });
+        setCloudRun(run);
+        setCloudMeta({
+          size: run.size,
+          cached: run.cached,
+          quotaLeft: run.quotaLeft,
+          mock: run.mock,
+          serverMs: run.serverMs,
+        });
+        // 缓存命中：服务端带回上次选中的那张，直接复用，不再让用户重选
+        if (run.cached && run.pickedId) {
+          await pickAndApply(run.taskId, run.pickedId);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // 失败 / 超时 / 配额用完：自动降级像素，不白屏也不让用户手动再点一次
+        setAiError(`${msg} · 已自动切回像素模式`);
+        setAiStyle('pixel');
+      } finally {
+        cloudInFlightRef.current = false;
+        setAiRunning(false);
+      }
+    })();
+  }, [aiStyle, cloudPending, stage, source, pickAndApply]);
+
   /* ---------------- 跑管线 ---------------- */
   useEffect(() => {
     if (!source || stage !== 'result') return;
@@ -205,45 +294,13 @@ export default function App() {
           } else if (aiStyle === 'cloud') {
             const cached = cloudRef.current;
             if (cached.source === source && cached.result) {
-              // 同一张裁剪图：复用已经付过费的结果，绝不重复调云端
+              // 同一张裁剪图 + 同一张选中项：复用已经付过费的结果，绝不重复调云端
               inputRgba = cached.result.rgba;
               setAiLast(cached.result);
-              setCloudMeta(cached.meta);
             } else {
-              setAiRunning(true);
-              try {
-                const styled = await applyCloudStyle({
-                  rgba: source.rgba,
-                  width: source.width,
-                  height: source.height,
-                  signal: ctrl.signal,
-                });
-                inputRgba = styled.rgba;
-                const meta = toCloudMeta(styled);
-                cloudRef.current = { source, result: styled, meta };
-                setAiLast(styled);
-                setCloudMeta(meta);
-                setAiError(null);
-              } catch (err) {
-                if (err instanceof DOMException && err.name === 'AbortError') {
-                  setAiRunning(false);
-                  setBusy(false);
-                  return;
-                }
-                const msg =
-                  err instanceof CloudError
-                    ? err.message
-                    : err instanceof Error
-                      ? err.message
-                      : String(err);
-                // 失败 / 超时 / 配额用完：自动降级像素，不白屏也不让用户手动再点一次
-                setAiError(`${msg} · 已自动切回像素模式`);
-                setAiRunning(false);
-                setBusy(false);
-                setAiStyle('pixel');
-                return;
-              }
-              setAiRunning(false);
+              // 还没点选：管线原地等待，等 handlePickCandidate 解码完再跑
+              setBusy(false);
+              return;
             }
           }
 
@@ -275,7 +332,7 @@ export default function App() {
     );
 
     return () => window.clearTimeout(timer);
-  }, [source, params, stage, aiStyle, cloudPending]);
+  }, [source, params, stage, aiStyle, cloudPending, cloudPickedId]);
 
   const onChange = useCallback((patch: Partial<PipelineParams>) => {
     // 用户亲手动过平滑滑块（含一键应用建议里的值），从此不再被模式切换覆盖
@@ -435,6 +492,10 @@ export default function App() {
               error={aiError}
               lastResult={aiLast}
               cloudMeta={cloudMeta}
+              cloudRun={cloudRun}
+              pickedId={cloudPickedId}
+              onPick={handlePickCandidate}
+              picking={cloudPicking}
               debug={debugEnabled}
               baselineConfetti={aiBaseline}
               currentConfetti={result?.report.continuity.confettiRatio ?? null}

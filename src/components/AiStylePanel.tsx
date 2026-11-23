@@ -6,13 +6,13 @@
  *   - 指标面板如实显示启用前后两个碎片率数字，不加评价。
  *   - AI 插画必须**点了才开始上传**：先出确认条，用户点「开始处理」才发请求。
  *
- * 三个选项的定位差别要在 UI 上说清楚，否则用户不知道为什么要为它付钱：
- *   像素 = 本地计算，0 下载 0 费用；
- *   AI 插画 = 图片上传到火山云，约 0.2 元/张，出图约 10 秒。
+ * AI 插画一次生成两张候选（火山 n 参数无效，服务端并行发两次）：
+ * 两张并排展示 → 用户点选 → 选中的那张才进本地管线。
+ * 没选之前管线不跑，也不会写缓存。
  */
 
 import type { AiStyle, AiStyleResult } from '../ai/types.ts';
-import type { CloudMeta } from '../ai/cloud.ts';
+import type { CloudMeta, CloudRunResult } from '../ai/cloud.ts';
 import { deviceLine } from '../lib/env.ts';
 
 interface Props {
@@ -26,6 +26,13 @@ interface Props {
   error: string | null;
   lastResult: AiStyleResult | null;
   cloudMeta: CloudMeta | null;
+  /** 本次生成的两张候选（null = 还没到「选择」阶段） */
+  cloudRun: CloudRunResult | null;
+  /** 用户已选中的候选 id */
+  pickedId: string | null;
+  /** 点选某张候选 */
+  onPick: (candidateId: string) => void;
+  picking: boolean;
   debug: boolean;
   /** 不启用风格化时的碎片率，用于如实展示「前后两个数字」 */
   baselineConfetti: number | null;
@@ -33,13 +40,15 @@ interface Props {
 }
 
 export function AiStylePanel(props: Props) {
-  const { style, onChoose, running, error, cloudPending } = props;
+  const { style, onChoose, running, error, cloudPending, cloudRun, pickedId } = props;
 
   const options = [
     ['none', '原始', '不启用风格化，直接走原图'],
     ['pixel', '像素', '本地计算 · 0 下载 0 费用'],
-    ['cloud', 'AI 插画', '上传到火山云处理 · 约 0.2 元/张'],
+    ['cloud', 'AI 插画', '上传到火山云 · 每次 2 张约 0.4 元'],
   ] as const;
+
+  const choosing = cloudRun !== null && !pickedId;
 
   return (
     <div className="ai-style">
@@ -67,8 +76,8 @@ export function AiStylePanel(props: Props) {
       {cloudPending && !running && (
         <div className="ai-confirm">
           <p>
-            AI 插画会把裁剪后的图片上传到火山云处理，单张约 <strong>0.2 元</strong>（每天最多 5 次），
-            出图约 10 秒。继续？
+            AI 插画会把裁剪后的图片上传到火山云处理，<strong>每次生成 2 张候选</strong>，约{' '}
+            <strong>0.4 元</strong>（每天最多 3 次），出图约 15 秒。继续？
           </p>
           <div className="ai-confirm-actions">
             <button type="button" className="btn-ghost" onClick={props.onCancelCloud}>
@@ -83,7 +92,37 @@ export function AiStylePanel(props: Props) {
 
       {running && (
         <div className="ai-progress-text">
-          {style === 'cloud' ? '云端处理中…（通常 8–15 秒）' : '像素化处理中…'}
+          {style === 'cloud'
+            ? '云端处理中…（并行生成 2 张，通常 10–20 秒）'
+            : '像素化处理中…'}
+        </div>
+      )}
+
+      {/* 两张候选并排：点选之前管线不动 */}
+      {style === 'cloud' && cloudRun && cloudRun.candidates.length > 0 && (
+        <div className="ai-candidates-wrap">
+          <div className="ai-candidates-hint">
+            {choosing ? '选一张进入图纸处理：' : '已选：'}
+            {cloudRun.cached && <span className="ai-cached"> · 缓存命中，未计费</span>}
+          </div>
+          <div className="ai-candidates">
+            {cloudRun.candidates.map((c, i) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`ai-candidate${pickedId === c.id ? ' is-on' : ''}`}
+                disabled={props.picking}
+                onClick={() => props.onPick(c.id)}
+                title={`第 ${i + 1} 张 · ${(c.bytes / 1024).toFixed(0)}KB · ${(c.upstreamMs / 1000).toFixed(1)}s`}
+              >
+                <img src={c.dataUrl} alt={`候选 ${i + 1}`} />
+                <span className="ai-candidate-label">
+                  {pickedId === c.id ? '已选' : `选第 ${i + 1} 张`}
+                </span>
+              </button>
+            ))}
+          </div>
+          {props.picking && <div className="ai-progress-text">正在读取选中的图…</div>}
         </div>
       )}
 
@@ -105,13 +144,14 @@ export function AiStylePanel(props: Props) {
         <div className="ai-debug">
           {style === 'cloud' ? (
             <>
-              <div>方式：云端（火山 Seedream 4.0）</div>
+              <div>方式：云端（火山 Seedream 4.0 · 并行 2 张）</div>
               <div>生成尺寸：{props.cloudMeta?.size ?? '—'}</div>
               <div>
-                缓存：{props.cloudMeta?.cached ? '命中（未计费）' : '未命中'}
-                {props.cloudMeta?.mock ? ' · mock' : ''}
+                候选：{cloudRun?.candidates.length ?? 0} 张
+                {pickedId ? ` · 选中 ${pickedId}` : ' · 待选择'}
+                {cloudRun?.cached ? ' · 缓存' : ''}
+                {cloudRun?.mock ? ' · mock' : ''}
               </div>
-              <div>端到端：{(props.lastResult?.inferenceMs ?? 0).toFixed(0)} ms</div>
               <div>
                 今日剩余：
                 {props.cloudMeta?.quotaLeft === null || props.cloudMeta?.quotaLeft === undefined
