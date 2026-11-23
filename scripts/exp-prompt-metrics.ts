@@ -87,7 +87,7 @@ function table(title: string, rows: Row[]): void {
   }
 }
 
-const images = { src: load('src'), old: load('old'), new: load('new') };
+const images = { src: load('src'), old: load('old'), new: load('new'), v3: load('v3') };
 
 /* ---------- 与构图无关的判据：细节密度 ---------- */
 
@@ -130,18 +130,25 @@ function detailDensity(img: ReturnType<typeof load>, block = 16, stdThreshold = 
 
 console.log('\n── 与构图无关的判据：细节密度（16×16 块中有纹理的占比）──');
 {
-  const rows = (['src', 'old', 'new'] as const).map((tag) => ({
-    tag,
-    d: detailDensity(images[tag]),
-  }));
-  for (const r of rows) console.log(`  ${r.tag.padEnd(4)} ${(r.d * 100).toFixed(1)}%`);
-  const [src, old, neu] = rows.map((r) => r.d);
-  console.log(`  → 旧提示词相对源图丢失 ${((src - old) * 100).toFixed(1)} 个百分点`);
-  console.log(`  → 新提示词相对源图丢失 ${((src - neu) * 100).toFixed(1)} 个百分点`);
+  const tags = ['src', 'old', 'new', 'v3'] as const;
+  const rows = tags.map((tag) => ({ tag, d: detailDensity(images[tag]) }));
+  const label: Record<string, string> = {
+    src: '源图',
+    old: 'V1 纯风格',
+    new: 'V2 只保人物',
+    v3: 'V3 三段式',
+  };
+  for (const r of rows) {
+    console.log(`  ${r.tag.padEnd(4)} ${label[r.tag].padEnd(12)} ${(r.d * 100).toFixed(1)}%`);
+  }
+  const src = rows[0].d;
+  for (const r of rows.slice(1)) {
+    console.log(
+      `  → ${label[r.tag]} 相对源图 ${r.d >= src ? '多' : '丢失'} ${Math.abs(r.d - src) * 100 < 0 ? '' : Math.abs((r.d - src) * 100).toFixed(1)} 个百分点`,
+    );
+  }
   console.log(
-    neu > old
-      ? '  → 新版保留了更多细节（被简化得更轻），与肉眼「人物完整」一致'
-      : '  → ⚠ 新版细节反而更少',
+    '  （细节密度只说明「简化得轻重」，不说明「人物某个部件还在不在」——那只能看图）',
   );
 }
 
@@ -149,7 +156,7 @@ console.log('── 提示词改版对比（同一张人像，16 色）───
 console.log(`  AI 插画模式平滑 = ${AI_IMAGE_STYLIZE}（本次主表）；0.4 作对照`);
 
 for (const width of [120, 200]) {
-  const rows = (['src', 'old', 'new'] as const).map((tag) =>
+  const rows = (['src', 'old', 'new', 'v3'] as const).map((tag) =>
     run(tag, images[tag], width, AI_IMAGE_STYLIZE),
   );
   table(`【${width} 格 · 平滑 ${AI_IMAGE_STYLIZE}】`, rows);
@@ -158,6 +165,6 @@ for (const width of [120, 200]) {
 // 对照：如果沿用旧的 0.4
 console.log('\n── 对照：沿用旧的平滑 0.4（说明为什么 AI 模式要降到 0.2）──');
 for (const width of [120, 200]) {
-  const rows = (['old', 'new'] as const).map((tag) => run(tag, images[tag], width, 0.4));
+  const rows = (['old', 'new', 'v3'] as const).map((tag) => run(tag, images[tag], width, 0.4));
   table(`【${width} 格 · 平滑 0.4】`, rows);
 }
