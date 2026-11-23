@@ -14,7 +14,10 @@
 import { MemoryTaskStore } from '../api/_lib/taskStore.ts';
 import type { CloudTask } from '../api/_lib/taskStore.ts';
 import {
-  CLOUD_PROMPT,
+  PROMPT_A,
+  PROMPT_B,
+  SLOTS,
+  candidateKey,
   COST_PER_RUN,
   DAILY_IMAGE_LIMIT,
   DAILY_RUN_LIMIT,
@@ -26,11 +29,15 @@ import {
 } from '../api/_lib/aiStyle.ts';
 import type { AiStyleDeps } from '../api/_lib/aiStyle.ts';
 import {
-  CLOUD_PROMPT as CLIENT_PROMPT,
   COST_PER_RUN as CLIENT_COST_PER_RUN,
   IMAGES_PER_RUN as CLIENT_IMAGES_PER_RUN,
   MAX_UPLOAD_EDGE,
 } from '../src/ai/cloud.ts';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 let pass = 0;
 const failures: string[] = [];
@@ -162,6 +169,9 @@ async function waitDone(
 
 interface CandidateWire {
   id: string;
+  slot?: 'a' | 'b';
+  label?: string;
+  hint?: string;
   ok: boolean;
   image?: string;
   error?: string;
@@ -284,8 +294,9 @@ console.log('\n[6] 点选候选：记录 pickedId、写缓存、返回选中的�
   const taskId = String(sub.json.taskId);
   const done = await waitDone(deps, taskId);
 
-  const before = await deps.store.getCachedTaskId(sha(5));
-  check('pick 之前不写缓存', before === null, `实际 ${String(before)}`);
+  const beforeA = await deps.store.getCachedTaskId(await candidateKey(sha(5), 'a'));
+  const beforeB = await deps.store.getCachedTaskId(await candidateKey(sha(5), 'b'));
+  check('pick 之前两路都不写缓存', beforeA === null && beforeB === null);
 
   const picked = await pick(deps, taskId, 'c2');
   check('pick 返回 200', picked.status === 200, `实际 ${picked.status}`);
@@ -294,8 +305,13 @@ console.log('\n[6] 点选候选：记录 pickedId、写缓存、返回选中的�
 
   const task = await deps.store.getTask(taskId);
   check('任务记录 pickedId=c2', task?.pickedId === 'c2', `实际 ${String(task?.pickedId)}`);
-  const after = await deps.store.getCachedTaskId(sha(5));
-  check('pick 之后写入缓存', after === taskId, `实际 ${String(after)}`);
+  const afterB = await deps.store.getCachedTaskId(await candidateKey(sha(5), 'b'));
+  const afterA = await deps.store.getCachedTaskId(await candidateKey(sha(5), 'a'));
+  check(
+    'pick c2 之后只写 B 档缓存（A 档不受影响）',
+    afterB === taskId && afterA === null,
+    `B=${String(afterB)} A=${String(afterA)}`,
+  );
 
   // 选一张不存在/失败的候选要被拒
   const badPick = await pick(deps, taskId, 'c9');
@@ -308,9 +324,9 @@ console.log('\n[6] 点选候选：记录 pickedId、写缓存、返回选中的�
   check('轮询仍返回 2 个候选', candidatesOf(statusAgain.json).length === 2);
 }
 
-/* ---------------- 7. 缓存命中（只在 pick 之后） ---------------- */
+/* ---------------- 7. 缓存命中（按档位分离，只在 pick 之后） ---------------- */
 
-console.log('\n[7] 同 key 再提交 → 命中「用户选中的那张」，不计费');
+console.log('\n[7] 同 key 再提交 → 只复用「用户选中过的档位」，按未命中张数计费');
 {
   const stub = stubFetch(() => okBody(41));
   const { deps } = makeDeps(null, stub.fn);
@@ -318,21 +334,44 @@ console.log('\n[7] 同 key 再提交 → 命中「用户选中的那张」，不
   const first = await submit(deps, { image: fakeJpeg(6), width: 1024, height: 768, key: sha(6) });
   const taskId = String(first.json.taskId);
   await waitDone(deps, taskId);
+  check('首次提交调用上游 2 次（A/B 各一次）', stub.calls() === 2, `实际 ${stub.calls()}`);
 
-  // 还没 pick → 不该命中缓存
+  // 还没 pick → 两路都没缓存，照常新建
   const noPick = await submit(deps, { image: fakeJpeg(6), width: 1024, height: 768, key: sha(6) });
   check('未点选时再次提交仍会新建任务', noPick.status === 201, `实际 ${noPick.status}`);
+  check('未点选时 cached = false', noPick.json.cached === false);
 
-  // pick 之后才命中
+  // pick A 之后：A 档命中缓存，B 档仍要新跑（只多调 1 次上游、只扣 1 张）
   await pick(deps, taskId, 'c1');
-  const hit = await submit(deps, { image: fakeJpeg(6), width: 1024, height: 768, key: sha(6) });
-  check('pick 之后返回 200', hit.status === 200, `实际 ${hit.status}`);
-  check('cached = true', hit.json.cached === true);
-  check('cost = 0', hit.json.cost === 0);
-  check('复用同一个 taskId', hit.json.taskId === taskId, `实际 ${String(hit.json.taskId)}`);
-  check('带上上次选中的 pickedId', hit.json.pickedId === 'c1', `实际 ${String(hit.json.pickedId)}`);
+  const beforeA = stub.calls();
+  const hitA = await submit(deps, { image: fakeJpeg(6), width: 1024, height: 768, key: sha(6) });
+  check('pick A 之后 cached = true', hitA.json.cached === true, `实际 ${String(hitA.json.cached)}`);
+  check('只扣未命中的 1 张（0.2 元）', hitA.json.cost === 0.2, `实际 ${String(hitA.json.cost)}`);
+  const taskA = await waitDone(deps, String(hitA.json.taskId));
+  const slotsA = candidatesOf(taskA).map((c) => c.slot ?? '?').sort();
+  check('新任务仍返回 A/B 两张', slotsA.join('') === 'ab', `实际 ${slotsA.join('')}`);
+  check(
+    'A 来自缓存、B 新跑 → 上游只多调 1 次',
+    stub.calls() - beforeA === 1,
+    `实际 ${stub.calls() - beforeA}`,
+  );
 
-  const third = await submit(deps, { image: fakeJpeg(7), width: 1024, height: 768, key: sha(7) });
+  // 再把这次任务里的 B 也 pick 掉，两路都进缓存
+  await pick(deps, String(hitA.json.taskId), 'c2');
+  const beforeBoth = stub.calls();
+  const hitBoth = await submit(deps, { image: fakeJpeg(6), width: 1024, height: 768, key: sha(6) });
+  check('两路都命中时 cost = 0', hitBoth.json.cost === 0, `实际 ${String(hitBoth.json.cost)}`);
+  check('两路都命中时 cached = true', hitBoth.json.cached === true);
+  check('两路都命中时不再调上游', stub.calls() === beforeBoth, `实际多调 ${stub.calls() - beforeBoth}`);
+  const taskBoth = await waitDone(deps, String(hitBoth.json.taskId));
+  check('两路都命中时任务直接 done', taskBoth.status === 'done', `实际 ${String(taskBoth.status)}`);
+
+  // 换 key 仍是全新任务（换设备号：前面的提交已经把当天的张数用掉大半）
+  const third = await submit(
+    deps,
+    { image: fakeJpeg(7), width: 1024, height: 768, key: sha(7) },
+    { 'x-device-id': 'device-third' },
+  );
   check('换 key 仍会新建任务', third.status === 201 && third.json.cached === false);
 }
 
@@ -424,7 +463,19 @@ console.log('\n[10] 异常路径');
 
 console.log('\n[11] 前后端契约一致（防止两边漂移导致重复计费）');
 {
-  check('提示词与前端完全一致', CLIENT_PROMPT === CLOUD_PROMPT);
+  check('A/B 两路提示词不同', PROMPT_A !== PROMPT_B);
+  check('A 档目标 8 色', PROMPT_A.includes('8 种'));
+  check('B 档目标 16 色', PROMPT_B.includes('16 种'));
+  check('两路档位固定为 a/b', SLOTS.join('') === 'ab');
+  check(
+    'A/B 缓存键不同（同一张输入图也不串味）',
+    (await candidateKey('f'.repeat(64), 'a')) !== (await candidateKey('f'.repeat(64), 'b')),
+  );
+
+  // 提示词只属于服务端：前端源码里不该再出现提示词文本
+  const clientSrc = readFileSync(resolve(root, 'src/ai/cloud.ts'), 'utf8');
+  check('前端不再携带提示词文本（只传图指纹）', !clientSrc.includes('颜色不超过'));
+
   check('前端上传长边 1024（与服务端尺寸规则相容）', MAX_UPLOAD_EDGE === 1024);
   check('两张/次 前后端一致', CLIENT_IMAGES_PER_RUN === IMAGES_PER_RUN);
   check('成本 0.4 前后端一致', CLIENT_COST_PER_RUN === COST_PER_RUN);

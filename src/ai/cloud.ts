@@ -22,12 +22,13 @@
 import type { AiStyleResult } from './types.ts';
 
 /**
- * 提示词必须与 api/_lib/aiStyle.ts 的 CLOUD_PROMPT 完全一致——
- * 它同时是缓存键的一部分，两边漂移会导致「同一张图重复计费」。
- * scripts/itest-cloud.ts 里有断言守着这件事。
+ * 提示词**不在这里**。
+ *
+ * 两路候选各用一套服务端提示词（A 极简 / B 标准），由 api/_lib/aiStyle.ts
+ * 的 PROMPT_A / PROMPT_B 定义，服务端再把它拼进缓存键（candidateKey）。
+ * 前端只负责「这张输入图长什么样」——算输入图指纹就够了。
+ * 这样换提示词只改服务端，不必两端同步，也就没有「两边漂移导致重复计费」这一类 bug。
  */
-export const CLOUD_PROMPT =
-  '把照片转成极简像素风图纸：背景去掉或简化为纯色块，只保留主体轮廓；减少杂色、用大块纯色、硬边、边缘干净；颜色不超过 12 种；保持原图取景与主体位置；不要文字、不要边框。';
 
 /** 上传前的长边上限（压到 1024 后 JPEG 约 150–400KB） */
 export const MAX_UPLOAD_EDGE = 1024;
@@ -93,6 +94,12 @@ export interface CloudMeta {
 /** 一个可展示的候选（缩略图用 dataURL，避免额外请求） */
 export interface CloudCandidateView {
   id: string;
+  /** 档位：a = 极简（好绣）、b = 标准（清晰） */
+  slot: 'a' | 'b';
+  /** 徽标文字，如「A」 */
+  label: string;
+  /** 一行说明，如「极简 · 好绣」 */
+  hint: string;
   dataUrl: string;
   bytes: number;
   upstreamMs: number;
@@ -190,12 +197,17 @@ async function toJpegBase64(
   return { base64: bytesToBase64(bytes), width: tw, height: th, bytes: bytes.length };
 }
 
-/** sha256(压缩后图 + 风格 + 提示词) → 缓存键 */
-async function cacheKey(base64: string): Promise<string> {
+/**
+ * 输入图指纹（baseKey）→ 服务端按档位派生完整缓存键。
+ *
+ * 这里**只算图**，不含提示词：A/B 两路各自的完整键由服务端
+ * candidateKey(slot, prompt) 拼出来，前端不需要知道提示词是什么。
+ */
+async function baseKey(base64: string): Promise<string> {
   if (typeof crypto === 'undefined' || !crypto.subtle) {
     throw new CloudError('encode', '当前环境不支持 Web Crypto，无法计算缓存键');
   }
-  const payload = new TextEncoder().encode(`cloud|${CLOUD_PROMPT}|${base64}`);
+  const payload = new TextEncoder().encode(`cloud|input|${base64}`);
   const digest = await crypto.subtle.digest('SHA-256', payload);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))
@@ -210,6 +222,9 @@ function sleep(ms: number): Promise<void> {
 
 interface CandidateWire {
   id: string;
+  slot?: 'a' | 'b';
+  label?: string;
+  hint?: string;
   ok: boolean;
   image?: string;
   bytes?: number;
@@ -406,7 +421,7 @@ async function decodeToRgba(
 export async function submitCloud(opts: CloudStyleOptions): Promise<CloudRunResult> {
   opts.onProgress?.({ phase: 'encode' });
   const encoded = await toJpegBase64(opts.rgba, opts.width, opts.height);
-  const key = await cacheKey(encoded.base64);
+  const key = await baseKey(encoded.base64);
 
   opts.onProgress?.({ phase: 'submit' });
   const submitted = await submit(
@@ -421,8 +436,11 @@ export async function submitCloud(opts: CloudStyleOptions): Promise<CloudRunResu
 
   const candidates: CloudCandidateView[] = (status.candidates ?? [])
     .filter((c) => c.ok && c.image)
-    .map((c) => ({
+    .map((c, i) => ({
       id: c.id,
+      slot: c.slot ?? (i === 0 ? 'a' : 'b'),
+      label: c.label ?? (c.slot === 'b' || i === 1 ? 'B' : 'A'),
+      hint: c.hint ?? (c.slot === 'b' || i === 1 ? '标准 · 清晰' : '极简 · 好绣'),
       dataUrl: c.image!,
       bytes: c.bytes ?? 0,
       upstreamMs: c.upstreamMs ?? 0,

@@ -22,10 +22,15 @@
 
 export type CloudTaskStatus = 'queued' | 'running' | 'done' | 'partial' | 'failed';
 
-/** 一次生成里的单张候选（并行两路各有自己的成败） */
+/** 候选档位：a = 极简（≤8 色、好绣）、b = 标准（≤16 色、清晰） */
+export type CandidateSlot = 'a' | 'b';
+
+/** 一次生成里的单张候选（两路各有自己的提示词与成败） */
 export interface CloudCandidate {
-  /** 稳定 id：c1 / c2，前端用它回传 pick */
+  /** 稳定 id：c1（A）/ c2（B），前端用它回传 pick */
   id: string;
+  /** 档位。缓存键按档位分离，A 的缓存不会冒领 B 的结果 */
+  slot: CandidateSlot;
   ok: boolean;
   /** 结果图 base64（不含 data: 前缀），仅 ok=true 时有 */
   image?: string;
@@ -38,17 +43,23 @@ export interface CloudCandidate {
 
 export interface CloudTask {
   id: string;
-  /** done = 全部候选成功；partial = 至少一张成功；failed = 全部失败 */
+  /** done = 所有待跑候选成功；partial = 至少一张成功；failed = 全部失败 */
   status: CloudTaskStatus;
-  /** sha256(压缩后的图 + prompt)，用于跨设备去重，命中则完全不调上游 */
+  /**
+   * 输入图哈希（前端只按压缩后的图算，不含 prompt）。
+   * 单个候选的缓存键由它 + 档位 + 该路提示词派生（见 candidateKey）。
+   */
   key: string;
-  prompt: string;
+  /** 本次真正要跑的档位；为空表示两路都命中缓存，无需调上游 */
+  pending?: CandidateSlot[];
+  /** 从缓存直接复用的候选（不必跑，也不占额度） */
+  prefilled?: CloudCandidate[];
   size: string;
   createdAt: number;
   updatedAt: number;
   startedAt?: number;
   finishedAt?: number;
-  /** 并行两路的候选结果，顺序稳定（c1 在前） */
+  /** 两路候选的最终结果，按档位顺序（A 在前） */
   candidates?: CloudCandidate[];
   /** 成功候选张数（0/1/2），前端不必自己数 */
   okCount?: number;

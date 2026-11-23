@@ -102,22 +102,23 @@ export function AiStylePanel(props: Props) {
       {style === 'cloud' && cloudRun && cloudRun.candidates.length > 0 && (
         <div className="ai-candidates-wrap">
           <div className="ai-candidates-hint">
-            {choosing ? '选一张进入图纸处理：' : '已选：'}
+            {choosing ? 'A 极简好绣 · B 细节清晰，选一张进入图纸处理：' : '已选：'}
             {cloudRun.cached && <span className="ai-cached"> · 缓存命中，未计费</span>}
           </div>
           <div className="ai-candidates">
-            {cloudRun.candidates.map((c, i) => (
+            {cloudRun.candidates.map((c) => (
               <button
                 key={c.id}
                 type="button"
                 className={`ai-candidate${pickedId === c.id ? ' is-on' : ''}`}
                 disabled={props.picking}
                 onClick={() => props.onPick(c.id)}
-                title={`第 ${i + 1} 张 · ${(c.bytes / 1024).toFixed(0)}KB · ${(c.upstreamMs / 1000).toFixed(1)}s`}
+                title={`${c.label} · ${c.hint} · ${(c.bytes / 1024).toFixed(0)}KB · ${(c.upstreamMs / 1000).toFixed(1)}s`}
               >
-                <img src={c.dataUrl} alt={`候选 ${i + 1}`} />
+                <img src={c.dataUrl} alt={`候选 ${c.label} ${c.hint}`} />
+                <span className="ai-candidate-badge">{c.label}</span>
                 <span className="ai-candidate-label">
-                  {pickedId === c.id ? '已选' : `选第 ${i + 1} 张`}
+                  {pickedId === c.id ? '已选' : c.hint}
                 </span>
               </button>
             ))}

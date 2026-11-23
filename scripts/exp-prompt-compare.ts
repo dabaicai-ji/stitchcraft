@@ -23,7 +23,6 @@ import { fileURLToPath } from 'node:url';
 import {
   ARK_URL,
   CLOUD_MODEL,
-  CLOUD_PROMPT,
   handleAiStyle,
   runCloudTask,
   seedreamSize,
@@ -38,6 +37,15 @@ mkdirSync(OUT, { recursive: true });
 /** 2026-11-23 之前的提示词，作为「改前」基线 */
 const OLD_PROMPT =
   '把这张照片改成扁平插画风，硬边大色块，保留主体轮廓与构图，去掉背景杂物和细碎纹理，颜色不超过 12 种，不要文字和边框';
+
+/**
+ * 2026-11-23 的「保人物」版，本实验的「改后」基线。
+ *
+ * ⚠️ 历史快照：产品里的提示词已经演进到 A/B 双档（PROMPT_A / PROMPT_B），
+ * 这里刻意内联旧文本而不是 import，是为了让这个实验永远可复现它当时测的那两版。
+ */
+const V2_PROMPT =
+  '保留人物完整形态/面部/姿态/服装，不要省略或替换人物，只简化背景和织物纹理，颜色不超过 12 种。';
 
 function loadEnvLocal(): Record<string, string> {
   const p = resolve(root, '.env.local');
@@ -63,7 +71,7 @@ const dataUrl = `data:image/jpeg;base64,${srcBuf.toString('base64')}`;
 // 源图是 512×512 的方图；尺寸规则与线上一致（短边 1024）
 const size = seedreamSize(512, 512);
 console.log(`输入：src-portrait.jpg ${(srcBuf.length / 1024).toFixed(0)}KB → 请求尺寸 ${size}`);
-console.log(`新提示词：${CLOUD_PROMPT}`);
+console.log(`新提示词：${V2_PROMPT}`);
 console.log(`旧提示词：${OLD_PROMPT}\n`);
 
 async function download(url: string): Promise<Buffer> {
@@ -180,7 +188,7 @@ const results: Result[] = [];
   console.log(
     `  ✓ ${file} · ${(buf.length / 1024).toFixed(0)}KB · ${(ms / 1000).toFixed(1)}s（上游 ${String(final.upstreamMs)}ms）`,
   );
-  results.push({ tag: 'new', prompt: CLOUD_PROMPT, file, bytes: buf.length, ms });
+  results.push({ tag: 'new', prompt: V2_PROMPT, file, bytes: buf.length, ms });
 }
 
 writeFileSync(
