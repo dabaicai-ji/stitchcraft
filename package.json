@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "oxlint",
-    "test": "node scripts/selftest.ts && node scripts/itest-pipeline.ts && node scripts/itest-pdf.ts && node scripts/itest-cloud.ts",
+    "test": "node scripts/selftest.ts && node scripts/itest-pipeline.ts && node scripts/itest-pdf.ts && node scripts/itest-cloud.ts && node scripts/itest-pixel.ts",
     "selftest": "node scripts/selftest.ts",
     "itest": "node scripts/itest-pipeline.ts",
     "itest:pdf": "node scripts/itest-pdf.ts",

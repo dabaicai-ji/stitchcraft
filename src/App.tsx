@@ -25,6 +25,7 @@ import { applyPixelStyle, disposeAi } from './ai/client.ts';
 import type { AiStyle, AiStyleResult } from './ai/types.ts';
 import { applyCloudStyle, CloudError, toCloudMeta } from './ai/cloud.ts';
 import type { CloudMeta } from './ai/cloud.ts';
+import { stylizeForMode } from './ai/stylizeMode.ts';
 import { BUILD_INFO, debugEnabled, deviceLine } from './lib/env.ts';
 import { buildThreadCsv, downloadCsv } from './render/exportCsv.ts';
 import { loadPdfFont } from './render/pdf/font.ts';
@@ -75,6 +76,8 @@ export default function App() {
   const firstRunRef = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const urlRef = useRef<string | null>(null);
+  /** 用户是否手动调过平滑滑块：调过就不再被模式切换自动覆盖 */
+  const stylizeTouchedRef = useRef(false);
 
   useEffect(
     () => () => {
@@ -147,6 +150,11 @@ export default function App() {
       // 关闭时立刻释放 Worker；像素模式本身 0 下载、无模型可加载
       if (next === 'none') disposeAi();
       setAiStyle(next);
+      // AI 插画已做结构简化，平滑降到 0.2；用户手动调过就不动，切走时恢复默认
+      setParams((prev) => {
+        const want = stylizeForMode(next, stylizeTouchedRef.current, prev.stylize);
+        return want === prev.stylize ? prev : { ...prev, stylize: want };
+      });
     },
     [aiStyle],
   );
@@ -270,6 +278,8 @@ export default function App() {
   }, [source, params, stage, aiStyle, cloudPending]);
 
   const onChange = useCallback((patch: Partial<PipelineParams>) => {
+    // 用户亲手动过平滑滑块（含一键应用建议里的值），从此不再被模式切换覆盖
+    if (patch.stylize !== undefined) stylizeTouchedRef.current = true;
     setParams((prev) => ({ ...prev, ...patch }));
   }, []);
 

@@ -16,6 +16,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pixelate } from '../src/ai/pixelate.ts';
 import type { PixelateParams } from '../src/ai/pixelate.ts';
+import { AI_IMAGE_STYLIZE, stylizeForMode } from '../src/ai/stylizeMode.ts';
 import { DMC_PALETTE } from '../src/core/palette/dmc.ts';
 import { DEFAULT_PARAMS, runPipeline } from '../src/core/pipeline/run.ts';
 
@@ -179,6 +180,20 @@ check(
 check('用色数不超过上限', out2.grid.palette.length <= DEFAULT_PARAMS.maxColors);
 check('碎片率在 0..1', out2.report.continuity.confettiRatio >= 0 && out2.report.continuity.confettiRatio <= 1);
 check('报告可序列化', typeof JSON.stringify(out2.report) === 'string');
+
+/* ---------------- 4. 风格模式 ↔ 平滑降噪联动 ---------------- */
+
+console.log('\n── 平滑降噪按模式联动 ────────────────────────────');
+console.log(
+  `  AI 插画 ${AI_IMAGE_STYLIZE} · 原始/像素 ${DEFAULT_PARAMS.stylize} · ` +
+    `切到 AI 插画 → ${stylizeForMode('cloud', false, DEFAULT_PARAMS.stylize)}`,
+);
+
+check('AI 插画模式默认降到 0.2', stylizeForMode('cloud', false, 0.4) === 0.2);
+check('原始模式沿用默认 0.4', stylizeForMode('none', false, 0.2) === DEFAULT_PARAMS.stylize);
+check('像素模式沿用默认 0.4', stylizeForMode('pixel', false, 0.2) === DEFAULT_PARAMS.stylize);
+check('用户手动调过则不覆盖', stylizeForMode('cloud', true, 0.8) === 0.8);
+check('AI 插画常量就是 0.2', AI_IMAGE_STYLIZE === 0.2);
 
 console.log(failures === 0 ? '\n✓ 像素风格化测试全部通过' : `\n✗ ${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

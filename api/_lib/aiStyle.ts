@@ -27,8 +27,18 @@ import type { CloudTask, TaskStore } from './taskStore.ts';
 /* ---------------- 常量（照横评实测，不随意改） ---------------- */
 
 export const CLOUD_MODEL = 'doubao-seedream-4-0-20260415';
+/**
+ * 提示词（2026-11-23 换版）。
+ *
+ * 前一版「扁平插画风 + 硬边大色块 + 去掉背景杂物」在人像上会把人物简化掉：
+ * 实测同一张人像，脸和衣服被替换成抽象色块。新版把约束重心从「风格化」
+ * 移到「保住人物」，只允许简化背景与织物纹理。
+ *
+ * ⚠️ 这段文字同时是缓存键的一部分（sha256 里含 prompt），
+ * 与 src/ai/cloud.ts 的 CLOUD_PROMPT 必须逐字一致，itest-cloud 有断言守着。
+ */
 export const CLOUD_PROMPT =
-  '把这张照片改成扁平插画风，硬边大色块，保留主体轮廓与构图，去掉背景杂物和细碎纹理，颜色不超过 12 种，不要文字和边框';
+  '保留人物完整形态/面部/姿态/服装，不要省略或替换人物，只简化背景和织物纹理，颜色不超过 12 种。';
 export const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
 
 /** 每设备 / IP 每天的次数上限（成本护栏） */
